@@ -16,6 +16,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kenfold/kenfold/internal/memory"
+	"github.com/kenfold/kenfold/internal/store"
 )
 
 // ErrNotImplemented is returned by Phase 0 stub handlers.
@@ -123,8 +124,10 @@ type ForgetOutput struct {
 	Status memory.Status `json:"status"`
 }
 
-// New builds the Kenfold MCP server with all tools registered.
-func New(version string) *mcp.Server {
+// New builds the Kenfold MCP server with all tools registered. st backs the
+// implemented tools; the remaining tools are Phase 0 stubs. st may be nil, in
+// which case every tool is a stub (useful for contract-only tests).
+func New(version string, st *store.Store) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{
 		Name:    "kenfold",
 		Title:   "Kenfold",
@@ -135,6 +138,8 @@ func New(version string) *mcp.Server {
 	readOnly := &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: closedWorld}
 	notDestructive := new(false)
 	destructive := new(true)
+
+	h := &handlers{store: st}
 
 	addTool(s, &mcp.Tool{
 		Name:        "get_context",
@@ -148,7 +153,7 @@ func New(version string) *mcp.Server {
 		Title:       "Remember",
 		Description: "Store a durable memory (decision, fact, convention, preference) shared with all of the user's agents. Use supersedes to replace an outdated memory instead of creating a contradiction.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: notDestructive, OpenWorldHint: closedWorld},
-	}, stub[RememberInput, RememberOutput]("remember"))
+	}, requireStore(st, h.remember, "remember"))
 
 	addTool(s, &mcp.Tool{
 		Name:        "recall",
@@ -176,9 +181,18 @@ func New(version string) *mcp.Server {
 		Title:       "Forget",
 		Description: "Soft-delete a memory that is wrong or no longer needed. The record is kept for audit but no longer served.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: destructive, IdempotentHint: true, OpenWorldHint: closedWorld},
-	}, stub[ForgetInput, ForgetOutput]("forget"))
+	}, requireStore(st, h.forget, "forget"))
 
 	return s
+}
+
+// requireStore returns h when st is non-nil, otherwise a stub. This lets
+// contract-only tests construct a server without a database.
+func requireStore[In, Out any](st *store.Store, h mcp.ToolHandlerFor[In, Out], name string) mcp.ToolHandlerFor[In, Out] {
+	if st == nil {
+		return stub[In, Out](name)
+	}
+	return h
 }
 
 // schemaOpts maps domain enums to JSON Schema enums so agents see valid values.

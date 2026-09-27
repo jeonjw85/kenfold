@@ -15,11 +15,11 @@ build: ## Build ./bin/kenfold
 test: ## Unit tests + stdio end-to-end test
 	go test ./...
 
-test-integration: ## Migration tests against the compose Postgres (throwaway database)
+test-integration: ## Integration tests against the compose Postgres (throwaway database)
 	@docker compose exec -T postgres psql -U kenfold -d kenfold -tAc \
 	  "SELECT 1 FROM pg_database WHERE datname = '$(TEST_DB)'" | grep -q 1 || \
 	  docker compose exec -T postgres psql -U kenfold -d kenfold -c "CREATE DATABASE $(TEST_DB)"
-	KENFOLD_TEST_DATABASE_URL="$(TEST_DB_URL)" go test -count=1 -run Integration -v ./migrations/
+	KENFOLD_TEST_DATABASE_URL="$(TEST_DB_URL)" go test -count=1 -run Integration -v ./migrations/ ./internal/store/
 
 lint: ## gofmt check + go vet
 	@test -z "$$(gofmt -l .)" || (gofmt -l . && echo "run: make fmt" && exit 1)

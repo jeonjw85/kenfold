@@ -24,6 +24,7 @@ import (
 	"github.com/kenfold/kenfold/internal/config"
 	"github.com/kenfold/kenfold/internal/httpserver"
 	"github.com/kenfold/kenfold/internal/mcpserver"
+	"github.com/kenfold/kenfold/internal/store"
 	"github.com/kenfold/kenfold/migrations"
 )
 
@@ -80,7 +81,7 @@ func run(ctx context.Context, args []string) error {
 	case "serve":
 		return serve(ctx, cfg, logger)
 	case "mcp":
-		return serveStdio(ctx, logger)
+		return serveStdio(ctx, cfg, logger)
 	case "migrate":
 		return migrate(ctx, cfg, logger, rest)
 	default:
@@ -104,9 +105,10 @@ func serve(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	}
 	defer pool.Close()
 
+	mcpSrv := mcpserver.New(buildinfo.Version, store.New(pool))
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpserver.New(mcpserver.New(buildinfo.Version), pool, logger, cfg.AllowedHosts),
+		Handler:           httpserver.New(mcpSrv, pool, logger, cfg.AllowedHosts),
 		ReadHeaderTimeout: 10 * time.Second,
 		// No WriteTimeout: MCP responses may be long-lived SSE streams.
 	}
@@ -129,9 +131,16 @@ func serve(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	return srv.Shutdown(shutdownCtx)
 }
 
-func serveStdio(ctx context.Context, logger *slog.Logger) error {
+func serveStdio(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	logger.Debug("kenfold mcp (stdio) starting", "version", buildinfo.Version)
-	err := mcpserver.New(buildinfo.Version).Run(ctx, &mcp.StdioTransport{})
+
+	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("database pool: %w", err)
+	}
+	defer pool.Close()
+
+	err = mcpserver.New(buildinfo.Version, store.New(pool)).Run(ctx, &mcp.StdioTransport{})
 	if errors.Is(err, context.Canceled) {
 		return nil
 	}

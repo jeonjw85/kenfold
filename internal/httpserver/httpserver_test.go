@@ -21,7 +21,7 @@ func (f fakeDB) Ping(context.Context) error { return f.err }
 func newTestServer(t *testing.T, db Pinger) *httptest.Server {
 	t.Helper()
 	logger := slog.New(slog.DiscardHandler)
-	ts := httptest.NewServer(New(mcpserver.New("test"), db, logger, []string{"localhost", "127.0.0.1", "::1"}))
+	ts := httptest.NewServer(New(mcpserver.New("test", nil), db, logger, []string{"localhost", "127.0.0.1", "::1"}))
 	t.Cleanup(ts.Close)
 	return ts
 }
