@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/kenfold/kenfold/internal/memory"
+	"github.com/kenfold/kenfold/internal/store"
 )
 
 // These cover the handler branches that return before touching the store, so
@@ -36,6 +37,35 @@ func TestForgetValidation(t *testing.T) {
 	h := &handlers{}
 	if _, _, err := h.forget(context.Background(), nil, ForgetInput{ID: " "}); err == nil {
 		t.Fatal("want tool error for empty id")
+	}
+}
+
+func TestRecallValidation(t *testing.T) {
+	h := &handlers{} // store not reached: empty query short-circuits
+	if _, _, err := h.recall(context.Background(), nil, RecallInput{Query: "  "}); err == nil {
+		t.Fatal("want tool error for empty query")
+	}
+}
+
+func TestHandoffValidation(t *testing.T) {
+	h := &handlers{} // store not reached: empty summary short-circuits
+	if _, _, err := h.handoff(context.Background(), nil, HandoffInput{Summary: ""}); err == nil {
+		t.Fatal("want tool error for empty summary")
+	}
+}
+
+func TestToMemoryView(t *testing.T) {
+	m := store.Memory{
+		ID: "abc", Type: memory.TypeProject, Scope: "project:x",
+		Content: "c", SourceAgent: "codex", Trust: memory.TrustAgent,
+	}
+	v := toMemoryView(m)
+	if v.ID != "abc" || v.Type != memory.TypeProject || v.Scope != "project:x" ||
+		v.Content != "c" || v.SourceAgent != "codex" || v.Trust != memory.TrustAgent {
+		t.Errorf("toMemoryView mismatch: %+v", v)
+	}
+	if v.Score != 0 {
+		t.Errorf("score should default to 0, got %v", v.Score)
 	}
 }
 

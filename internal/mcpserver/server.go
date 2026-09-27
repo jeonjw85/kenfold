@@ -146,7 +146,7 @@ func New(version string, st *store.Store) *mcp.Server {
 		Title:       "Get context",
 		Description: "Load the memory context for the current task: user preferences, project knowledge, relevant memories, and any pending handoff. Call this at the start of a task.",
 		Annotations: readOnly,
-	}, stub[GetContextInput, GetContextOutput]("get_context"))
+	}, requireStore(st, h.getContext, "get_context"))
 
 	addTool(s, &mcp.Tool{
 		Name:        "remember",
@@ -160,21 +160,21 @@ func New(version string, st *store.Store) *mcp.Server {
 		Title:       "Recall",
 		Description: "Search shared memory with a natural-language query. Returns the most relevant active memories with their source agent and trust level.",
 		Annotations: readOnly,
-	}, stub[RecallInput, RecallOutput]("recall"))
+	}, requireStore(st, h.recall, "recall"))
 
 	addTool(s, &mcp.Tool{
 		Name:        "handoff",
 		Title:       "Hand off",
 		Description: "Leave a handoff note so another agent or session can continue unfinished work. Call before ending a session with work in progress.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: notDestructive, OpenWorldHint: closedWorld},
-	}, stub[HandoffInput, HandoffOutput]("handoff"))
+	}, requireStore(st, h.handoff, "handoff"))
 
 	addTool(s, &mcp.Tool{
 		Name:        "resume",
 		Title:       "Resume",
 		Description: "Fetch the latest handoff note for a project to continue where another agent or session left off.",
 		Annotations: readOnly,
-	}, stub[ResumeInput, ResumeOutput]("resume"))
+	}, requireStore(st, h.resume, "resume"))
 
 	addTool(s, &mcp.Tool{
 		Name:        "forget",

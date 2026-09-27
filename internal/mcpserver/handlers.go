@@ -85,6 +85,167 @@ func (h *handlers) forget(ctx context.Context, _ *mcp.CallToolRequest, in Forget
 	return nil, ForgetOutput{ID: m.ID, Status: m.Status}, nil
 }
 
+// defaultHandoffTTL is used when the caller does not specify one.
+const defaultHandoffTTL = 7 * 24 * time.Hour
+
+// recall runs a lexical full-text search over shared memory. Vector/hybrid
+// ranking is a later phase; this returns FTS matches ranked by ts_rank.
+func (h *handlers) recall(ctx context.Context, _ *mcp.CallToolRequest, in RecallInput) (*mcp.CallToolResult, RecallOutput, error) {
+	if strings.TrimSpace(in.Query) == "" {
+		return toolError[RecallOutput]("query must not be empty")
+	}
+	scored, err := h.store.Search(ctx, store.SearchParams{
+		Query: in.Query,
+		Scope: scopeFor(in.Project),
+		Types: in.Types,
+		Limit: in.Limit,
+	})
+	if err != nil {
+		return nil, RecallOutput{}, err
+	}
+	out := RecallOutput{Memories: make([]MemoryView, 0, len(scored))}
+	for _, s := range scored {
+		v := toMemoryView(s.Memory)
+		v.Score = s.Score
+		out.Memories = append(out.Memories, v)
+	}
+	return nil, out, nil
+}
+
+// handoff stores a note for the next agent/session as a temporary memory with a
+// TTL. next_steps and the handoff marker are kept in attrs so resume can find it.
+func (h *handlers) handoff(ctx context.Context, req *mcp.CallToolRequest, in HandoffInput) (*mcp.CallToolResult, HandoffOutput, error) {
+	summary := strings.TrimSpace(in.Summary)
+	if summary == "" {
+		return toolError[HandoffOutput]("summary must not be empty")
+	}
+
+	ttl := defaultHandoffTTL
+	if in.TTLSeconds > 0 {
+		ttl = time.Duration(in.TTLSeconds) * time.Second
+	}
+	exp := time.Now().Add(ttl)
+
+	attrs := map[string]any{"kind": "handoff"}
+	if len(in.NextSteps) > 0 {
+		steps := make([]any, len(in.NextSteps))
+		for i, s := range in.NextSteps {
+			steps[i] = s
+		}
+		attrs["next_steps"] = steps
+	}
+
+	m, err := h.store.Create(ctx, store.CreateParams{
+		Type:        memory.TypeTemporary,
+		Scope:       scopeFor(in.Project),
+		Content:     summary,
+		Attrs:       attrs,
+		SourceAgent: agentName(req),
+		Trust:       memory.TrustAgent,
+		Confidence:  0.5,
+		Status:      memory.StatusActive,
+		ExpiresAt:   &exp,
+	})
+	if err != nil {
+		return nil, HandoffOutput{}, err
+	}
+	expires := time.Now().Add(ttl)
+	if m.ExpiresAt != nil {
+		expires = *m.ExpiresAt
+	}
+	return nil, HandoffOutput{ID: m.ID, ExpiresAt: expires}, nil
+}
+
+// resume returns the latest unexpired handoff for the project, or an empty
+// result (no handoff field) when there is none.
+func (h *handlers) resume(ctx context.Context, _ *mcp.CallToolRequest, in ResumeInput) (*mcp.CallToolResult, ResumeOutput, error) {
+	m, err := h.store.LatestHandoff(ctx, scopeFor(in.Project))
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, ResumeOutput{}, nil
+	}
+	if err != nil {
+		return nil, ResumeOutput{}, err
+	}
+	v := toMemoryView(m)
+	return nil, ResumeOutput{Handoff: &v}, nil
+}
+
+// getContext assembles the memory context for the start of a task: user
+// preferences, the pending handoff, project knowledge, and task-relevant
+// memories. Vector ranking is a later phase; relevant[] uses FTS on the task.
+func (h *handlers) getContext(ctx context.Context, _ *mcp.CallToolRequest, in GetContextInput) (*mcp.CallToolResult, GetContextOutput, error) {
+	projectScope := scopeFor(in.Project)
+	scopes := []string{"user"}
+	if projectScope != "user" {
+		scopes = append(scopes, projectScope)
+	}
+
+	var out GetContextOutput
+
+	// Preferences are always injected (user-wide).
+	prefs, err := h.store.ListByScopeTypes(ctx, []string{"user"}, []memory.Type{memory.TypePreference}, 50)
+	if err != nil {
+		return nil, GetContextOutput{}, err
+	}
+	out.Preferences = toMemoryViews(prefs)
+
+	// Pending handoff for this project, if any.
+	if hm, err := h.store.LatestHandoff(ctx, projectScope); err == nil {
+		v := toMemoryView(hm)
+		out.Handoff = &v
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return nil, GetContextOutput{}, err
+	}
+
+	// Project knowledge.
+	if projectScope != "user" {
+		proj, err := h.store.ListByScopeTypes(ctx, []string{projectScope}, []memory.Type{memory.TypeProject}, 50)
+		if err != nil {
+			return nil, GetContextOutput{}, err
+		}
+		out.Project = toMemoryViews(proj)
+	}
+
+	// Task-relevant memories via FTS on the task description.
+	if strings.TrimSpace(in.Task) != "" {
+		scored, err := h.store.Search(ctx, store.SearchParams{Query: in.Task, Scope: projectScope, Limit: 10})
+		if err != nil {
+			return nil, GetContextOutput{}, err
+		}
+		for _, s := range scored {
+			v := toMemoryView(s.Memory)
+			v.Score = s.Score
+			out.Relevant = append(out.Relevant, v)
+		}
+	}
+
+	return nil, out, nil
+}
+
+// toMemoryView maps a stored memory to the agent-facing view.
+func toMemoryView(m store.Memory) MemoryView {
+	return MemoryView{
+		ID:          m.ID,
+		Type:        m.Type,
+		Scope:       m.Scope,
+		Content:     m.Content,
+		SourceAgent: m.SourceAgent,
+		Trust:       m.Trust,
+		CreatedAt:   m.CreatedAt,
+	}
+}
+
+func toMemoryViews(ms []store.Memory) []MemoryView {
+	if len(ms) == 0 {
+		return nil
+	}
+	out := make([]MemoryView, len(ms))
+	for i, m := range ms {
+		out[i] = toMemoryView(m)
+	}
+	return out
+}
+
 // scopeFor maps a project argument to a scope. An empty project is user-wide.
 func scopeFor(project string) string {
 	project = strings.TrimSpace(project)
