@@ -72,6 +72,7 @@ Constraints enforce the invariants that must never be violated by any writer: va
 
 - Personal, local-first deployment. Multi-user/team tenancy is out of scope until after Phase 4; `scope` leaves room for it.
 - Local embeddings (Ollama + bge-m3) by default so code and conversations stay on the machine; API providers are optional.
+- Memory extraction uses a small local chat model (`qwen3.5:4b` through Ollama's OpenAI-compatible API) so session content stays on the machine. The model only proposes: validation is mechanical (allowed categories, evidence grounded in the session and outside pasted text, no secrets, novelty), and extracted memories are reviewed before they are served, because extraction is the main path by which injected instructions could become trusted memory.
 
 ## Roadmap
 
@@ -80,7 +81,7 @@ Constraints enforce the invariants that must never be violated by any writer: va
 | 0 | Schema, MCP contract, repo skeleton, compose | `docker compose up` boots; MCP `tools/list` works |
 | 1 | Real storage/search for all types (full-text + vector, RRF), API keys, CLI, client setup for Claude Code / Codex / OpenCode, handoff/resume, exact dedup, supersede | a decision remembered in Claude Code is recalled in Codex (E2E test) |
 | 2 | Secret filter on writes, normalized dedup, similarity/contradiction hints, hook-based auto-capture of session summaries (Claude Code, Codex), handoff | handoff scenario E2E passes |
-| 2b | Model-based extraction of memories from session logs and type classification (needs a local chat model) | extracted memories reviewed on an internal set |
+| 2b | Model-based extraction of memories from session summaries (proposed for review by default) and type classification, with a local chat model (default `qwen3.5:4b`) | extracted memories measured on an internal eval set (dev + holdout; see `internal/extract/testdata/RESULTS.md`) |
 | 3 | Graph relations, tree-sitter indexing, commit-based invalidation, recency and graph signals in ranking, rerank | recall@5 target on internal eval set |
 | 4 | OAuth 2.1, HTTPS deployment/tunnel, object storage, ChatGPT, OpenAI-compatible proxy for local LLMs | recall works from ChatGPT |
 | 5 | Consolidation workers, review dashboard, LongMemEval/LoCoMo evals, export/import | ongoing |

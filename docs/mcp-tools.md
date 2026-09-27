@@ -46,7 +46,7 @@ Store a durable memory.
 | Param | Type | Required | Notes |
 |---|---|---|---|
 | `content` | string | yes | Self-contained statement, at most 8000 characters |
-| `type` | enum | | Default: `project` when `project` is given, otherwise `semantic` |
+| `type` | enum | | If omitted: the type of the superseded memory; else the chat model's classification when configured; else `project` when `project` is given, otherwise `semantic` |
 | `project` | string | | Omit for user-wide |
 | `supersedes` | string (id) | | An active memory in the same scope that this one replaces |
 | `ttl_seconds` | integer | | Required for `type = temporary`; at most one year |
@@ -58,8 +58,6 @@ Returns `id`, `type`, `status`, `deduplicated`, and `similar`.
 - **Supersede**: the replaced memory must be active and in the same scope. When the new memory is active, the old one becomes `superseded` in the same transaction and is kept as history. When the new memory is `proposed`, the old one stays active until the new one is approved.
 - **Session summaries**: an `episodic` memory sent with a session id (see Conventions) supersedes the earlier summary from the same agent and session, so each session keeps one current summary.
 - **Review**: new `preference` memories are `proposed` and are not served until the user approves them (`kenfold memory approve <id>`), which also sets `trust = user`.
-
-Planned (Phase 2b): model-based extraction of memories from sessions and type classification.
 
 ### `recall` (read-only)
 
@@ -117,6 +115,19 @@ Returns `id`, `status`. The first deletion records `forgotten_by` and `forget_re
 | `SessionEnd` | Builds an extractive summary (requests, final response, compaction summary) and sends it with `remember` as an `episodic` memory with the session id. It is spooled first, so a summary interrupted by the client's time limit or an unreachable server is sent at the next `SessionStart`. |
 
 Sessions outside a git repository are not recorded; their context is user-wide. The hook always exits 0.
+
+## Model-based extraction
+
+When a chat model is configured (`KENFOLD_CHAT_URL`), `kenfold serve` reads each session summary a few minutes after it is written and asks the model for the durable memories in it. Every proposal is checked mechanically before it is stored:
+
+- It must be a project rule (`project`), a code fact (`codebase`), a user preference (`preference`), or a general fact (`semantic`); tasks, status updates, and content from pasted documents are dropped. Sessions outside a repository yield only preferences and general facts.
+- Its evidence, a quote the model gives, must occur in the session, and not inside a long quoted or fenced block (pasted third-party text).
+- It must be 8–400 characters and contain no secret.
+- It must be new in its scope: a memory with the same content in any status (including one the user rejected) is not proposed again.
+
+Extracted memories are written by `kenfold-extractor` with `source_session` and `attrs.session_agent` of the summarized session, `attrs.evidence`, `attrs.extractor_model`, `attrs.similar_to` (ids of active or proposed memories they resemble), and a `derived_from` edge to the summary. By default they are `proposed` and are served only after the user approves them (`kenfold memory review`). With `KENFOLD_EXTRACT_POLICY=auto`, a memory the model stated directly that resembles nothing existing is activated; preferences and memories with `similar_to` are still proposed.
+
+The same model classifies memories stored with `remember` without a `type` (`attrs.type_source`: `agent`, `model`, `superseded` when the type was taken from the replaced memory, or `default` when no model is configured, it failed, or it took longer than 15 seconds).
 
 ## `MemoryView`
 

@@ -20,7 +20,7 @@ What makes it different (see [ADR-0001](docs/adr/0001-architecture.md)):
 - **Handoff** between agents: stop in Claude Code, resume in Codex
 - **Poisoning-aware**: memory is served as data, never as instructions; preferences need your approval
 
-> **Status: Phase 2.** Shared storage, hybrid search (full-text + vectors), API keys, setup for Claude Code, Codex, and OpenCode, a server-side **secret filter**, duplicate and contradiction hints, and **session hooks** that load memory at session start and record a summary at session end. Not yet: model-based extraction and classification of memories from conversations.
+> **Status: Phase 2b.** Shared storage, hybrid search (full-text + vectors), API keys, setup for Claude Code, Codex, and OpenCode, a server-side **secret filter**, duplicate and contradiction hints, **session hooks** that load memory at session start and record a summary at session end, and optional **model-based extraction** that turns session summaries into memories for your review.
 
 ## Quickstart
 
@@ -116,6 +116,21 @@ Merge the printed `hooks` object into `~/.claude/settings.json`. For Codex, use 
 
 `--no-capture` loads memory at session start without recording sessions.
 
+## Memory extraction (optional)
+
+Session summaries record what happened. With a chat model configured, Kenfold also reads each summary and proposes the durable memories in it: project rules ("use pnpm, not npm"), facts about the code ("the webhook dedupes by event_id"), and your preferences ("answer in Korean"). It skips one-off tasks and anything from pasted documents.
+
+```sh
+make up-extract                # Ollama with bge-m3 and qwen3.5:4b (first run downloads ~4.6 GB)
+make review                    # go through proposed memories: approve, reject, or replace an old one
+```
+
+Extracted memories are `proposed`: nothing is served to agents until you approve it. Each one shows the quote it came from and any existing memory it resembles; approving with "replace" retires the old one. A memory you reject is not proposed again. The same model also picks the type of memories that agents store without one; this adds about 6 seconds to such a `remember` call on CPU, and if the model takes longer than 15 seconds (while it loads, or is busy extracting) the default type is used.
+
+The model runs on CPU in Docker and takes 10–30 seconds per session, in the background. On CPUs with performance and efficiency cores, set `THREADS` to the number of performance cores (default 4; `make up-embed THREADS=6`): Ollama's default of one thread per core was 30–80× slower on an Apple M5, for embeddings as well as chat. Any OpenAI-compatible chat API works (`KENFOLD_CHAT_URL`, `KENFOLD_CHAT_MODEL`). Quality on the internal eval set is recorded in [internal/extract/testdata/RESULTS.md](internal/extract/testdata/RESULTS.md) (`make eval`).
+
+`KENFOLD_EXTRACT_POLICY=auto` activates confident extractions that resemble no existing memory without review. Preferences are always reviewed. Keep the default unless you trust every source of your sessions: extraction is where instructions hidden in pasted content could become memory, and review is the main defense.
+
 ## How memory works
 
 - **Projects** are identified by the git remote URL, normalized: `git@github.com:Org/Repo.git` and `https://github.com/org/repo` are the same project. Local paths are rejected, since they differ per checkout. Memories without a project are user-wide and are included everywhere.
@@ -129,7 +144,8 @@ Review what agents stored:
 
 ```sh
 make build
-bin/kenfold memory list --status proposed   # e.g. preferences waiting for approval
+bin/kenfold memory review                   # interactive: approve, reject, or replace
+bin/kenfold memory list --status proposed   # e.g. preferences and extracted memories waiting for review
 bin/kenfold memory approve <id>
 bin/kenfold memory forget <id> --reason "outdated"
 ```
@@ -165,8 +181,12 @@ kenfold key create <agent>           create an API key (printed once, to stdout)
 kenfold key list [--all]             list keys (--all includes revoked)
 kenfold key revoke <id|prefix>       revoke a key
 kenfold memory list [--status S] [--type T] [--scope S] [--limit N]
-kenfold memory approve <id>          approve a proposed memory
+kenfold memory review [--scope S]    go through proposed memories interactively
+kenfold memory approve <id>... [--replaces ID]
+kenfold memory reject <id>... [--reason R]
 kenfold memory forget <id> [--reason R]
+kenfold extract status               extraction progress
+kenfold extract run [--limit N]      extract memories from session summaries now
 kenfold reindex                      embed memories missing an embedding for the configured model
 kenfold scan [--redact]              find (and remove) secrets stored before the secret filter
 kenfold hook                         session hook for Claude Code and Codex (event JSON on stdin)
@@ -187,9 +207,17 @@ kenfold version
 | `KENFOLD_AGENT` | agent name for `kenfold mcp` (stdio), e.g. `codex` |
 | `KENFOLD_EMBED_URL` | unset (full-text search only). Any OpenAI-compatible embeddings API, e.g. `http://127.0.0.1:11434/v1` for Ollama |
 | `KENFOLD_EMBED_MODEL` | `bge-m3`. Must produce 1024-dimensional vectors |
+| `KENFOLD_EMBED_NAME` | unset; the model name recorded with vectors when `KENFOLD_EMBED_MODEL` is a local alias with identical output (`make up-embed` uses `kenfold-embed`, recorded as `bge-m3`) |
 | `KENFOLD_EMBED_API_KEY` | unset; sent as a bearer token to the embeddings API |
 | `KENFOLD_EMBED_DIMENSIONS` | `false`; send `dimensions=1024` (for models such as `text-embedding-3-large`) |
 | `KENFOLD_SEARCH_MAX_DISTANCE` | `0.55`, the cosine distance above which vector matches are ignored |
+| `KENFOLD_CHAT_URL` | unset (no extraction). Any OpenAI-compatible chat API, e.g. `http://127.0.0.1:11434/v1` for Ollama |
+| `KENFOLD_CHAT_MODEL` | `qwen3.5:4b` (`make up-extract` uses `kenfold-extract`, the same model with a thread limit) |
+| `KENFOLD_CHAT_API_KEY` | unset; sent as a bearer token to the chat API |
+| `KENFOLD_CHAT_REASONING` | `none`, sent as `reasoning_effort`; `omit` for servers that reject the field |
+| `KENFOLD_EXTRACT` | on when a chat model is configured |
+| `KENFOLD_EXTRACT_POLICY` | `propose` (review everything) or `auto` |
+| `KENFOLD_CLASSIFY` | on when a chat model is configured; types memories stored without one |
 | `KENFOLD_LOG_LEVEL` | `info` |
 
 The hook reads `KENFOLD_URL` (default `http://127.0.0.1:7077/mcp`), `KENFOLD_API_KEY` (unless `--key-file` is given), and `KENFOLD_STATE_DIR` (default `~/.local/state/kenfold`).
@@ -202,6 +230,7 @@ Changing `KENFOLD_EMBED_MODEL` to another 1024-dimensional model needs no migrat
 make test               # unit tests + stdio end-to-end test (no database needed)
 make test-integration   # store, API key, migration, cross-agent, and handoff-scenario tests against the compose Postgres
 make lint               # gofmt + go vet
+make eval               # extraction quality against a real model (needs make up-extract)
 make build              # ./bin/kenfold
 make logs | make down
 ```
@@ -213,6 +242,8 @@ cmd/kenfold/          CLI: serve, mcp, hook, admin commands; end-to-end tests
 internal/mcpserver/   MCP tool definitions (source of truth for the contract) and handlers
 internal/store/       PostgreSQL persistence and hybrid search
 internal/hook/        Claude Code / Codex session hook: context injection, capture, spool
+internal/extract/     model-based memory extraction and classification; eval set
+internal/chat/        OpenAI-compatible chat client (structured output)
 internal/secrets/     credential detection and redaction
 internal/apikey/      API keys and the bearer-token verifier
 internal/embed/       OpenAI-compatible embeddings client
@@ -230,7 +261,7 @@ docs/                 ADRs and specs
 | **0** ✅ | Schema, MCP contract, skeleton, compose |
 | **1** ✅ | Real storage and hybrid search, API keys, CLI, Claude Code / Codex / OpenCode setup |
 | **2** ✅ | Secret filter, duplicate and contradiction hints, session hooks with automatic session summaries |
-| 2b | Model-based extraction and classification of memories from sessions |
+| **2b** ✅ | Model-based extraction of memories from sessions (reviewed), type classification |
 | 3 | Graph relations, code indexing, commit-based invalidation, recency and graph ranking, rerank |
 | 4 | OAuth 2.1, remote deployment, ChatGPT, object storage |
 | 5 | Consolidation, review dashboard, benchmarks |
