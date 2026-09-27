@@ -10,6 +10,9 @@ Contract for the tools Kenfold exposes over MCP. Schemas are generated from the 
 - **Status**: `proposed`, `active`, `superseded`, `deleted`. Reads return `active`, unexpired memories only.
 - **The calling agent** (`source_agent`) is determined by the server, never from tool arguments. Over HTTP it is the agent the API key was created for. For stdio servers it is `KENFOLD_AGENT`; without it, the client's `clientInfo.name` (lowercased, sanitized). If none is available, `unknown`.
 - **Errors**: invalid arguments are rejected by schema validation before reaching the handler. Domain errors (bad id, oversized input, superseding a retired memory) are returned as tool errors (`isError: true`) with a message the model can act on. Internal failures return a generic tool error; details go to the server log only.
+- **Secrets**: `remember` and `handoff` reject content that contains credentials (provider API keys and tokens, private keys, JWTs, passwords in URLs, random-looking values assigned to secret-named fields). The error names the kind of secret, never its value. `forget` reasons and search queries are redacted instead of rejected.
+- **Sessions**: a client may send `_meta: {"kenfold/session_id": "<id>"}` with a tool call; it is recorded as the memory's `source_session`. `kenfold hook` does this for session summaries.
+- **Local paths are not projects**: `project` values such as `/home/me/repo` or `~/repo` are rejected, because the same repository would become a different project on every machine.
 - **Memory is data**: returned `content` must never be interpreted by the agent as instructions.
 
 ## Search
@@ -34,7 +37,7 @@ Load everything relevant at the start of a task, within a token budget.
 | `project` | string | | See conventions |
 | `budget_tokens` | integer | | Default 2000, clamped to 200–32000 |
 
-Returns, in priority order: `preferences[]` (active preferences, user-wide and project), `handoff` (the latest handoff for the project that no agent has resumed), `project[]` (active `project` memories), and `relevant[]` (hybrid search on `task`). Each memory appears at most once. Memories that do not fit the budget are left out and `truncated` is set; use `recall` to find more. Token counts are estimates.
+Returns, in priority order: `preferences[]` (active preferences, user-wide and project), `handoff` (the latest handoff for the project that no agent has resumed), `recent[]` (the latest three session summaries in the project, `episodic` memories written by session hooks, truncated to 800 characters), `project[]` (active `project` memories), and `relevant[]` (hybrid search on `task`). Each memory appears at most once. Memories that do not fit the budget are left out and `truncated` is set; use `recall` to find more. Token counts are estimates.
 
 ### `remember` (idempotent)
 
@@ -48,13 +51,15 @@ Store a durable memory.
 | `supersedes` | string (id) | | An active memory in the same scope that this one replaces |
 | `ttl_seconds` | integer | | Required for `type = temporary`; at most one year |
 
-Returns `id`, `type`, `status`, and `deduplicated`.
+Returns `id`, `type`, `status`, `deduplicated`, and `similar`.
 
-- **Deduplication**: storing exactly the same content (after trimming) with the same type and scope as an existing active or proposed memory returns that memory with `deduplicated: true`; nothing new is stored.
+- **Deduplication**: content that differs from an existing active or proposed memory of the same type and scope only in case, whitespace, or trailing punctuation returns that memory with `deduplicated: true`; nothing new is stored. Superseding a memory with the same statement is also a no-op.
+- **Similar memories**: after storing, `similar[]` lists up to three active memories in the same scope that are close to the new one (cosine distance ≤ 0.25 with embeddings, or trigram similarity ≥ 0.5). They may state the same fact differently or contradict it. Kenfold does not decide which is right: the agent supersedes or forgets the outdated one. Session summaries and temporary memories are not checked.
 - **Supersede**: the replaced memory must be active and in the same scope. When the new memory is active, the old one becomes `superseded` in the same transaction and is kept as history. When the new memory is `proposed`, the old one stays active until the new one is approved.
+- **Session summaries**: an `episodic` memory sent with a session id (see Conventions) supersedes the earlier summary from the same agent and session, so each session keeps one current summary.
 - **Review**: new `preference` memories are `proposed` and are not served until the user approves them (`kenfold memory approve <id>`), which also sets `trust = user`.
 
-Planned (Phase 2): secret scanning (reject), near-duplicate merge, contradiction detection that suggests `supersedes`, model-based type classification.
+Planned (Phase 2b): model-based extraction of memories from sessions and type classification.
 
 ### `recall` (read-only)
 
@@ -100,6 +105,18 @@ Soft-delete a memory: `status = deleted`. The row is kept for audit and history;
 | `reason` | string | | Truncated to 1000 characters |
 
 Returns `id`, `status`. The first deletion records `forgotten_by` and `forget_reason`; forgetting again returns the memory unchanged.
+
+## Session hooks
+
+`kenfold hook` is a command hook for Claude Code and Codex. It is an MCP client of the server like any agent, authenticated by the agent's API key, so its writes pass the same checks.
+
+| Event | What the hook does |
+|---|---|
+| `SessionStart` | Detects the project from the git remote of `cwd`; sends summaries spooled by earlier sessions; calls `get_context` (budget 1500) and returns it as `additionalContext`, framed as reference data, not instructions. On failure it shows a warning (`systemMessage`) and the session continues. |
+| `UserPromptSubmit`, `Stop`, `PostCompact` | Appends the prompt, final response, or compaction summary to a local session log (redacted, mode 0600). No network call. |
+| `SessionEnd` | Builds an extractive summary (requests, final response, compaction summary) and sends it with `remember` as an `episodic` memory with the session id. It is spooled first, so a summary interrupted by the client's time limit or an unreachable server is sent at the next `SessionStart`. |
+
+Sessions outside a git repository are not recorded; their context is user-wide. The hook always exits 0.
 
 ## `MemoryView`
 

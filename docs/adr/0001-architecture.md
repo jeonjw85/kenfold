@@ -66,7 +66,7 @@ Constraints enforce the invariants that must never be violated by any writer: va
 - Phase 0–1 are **local only**: bind to loopback; compose publishes ports on `127.0.0.1` only.
 - `/mcp` enforces a Host allowlist (DNS-rebinding defense) and rejects cross-origin browser requests. The SDK's built-in rebinding check only applies to connections arriving on a loopback address, which is not the case behind Docker port publishing, so Kenfold enforces its own.
 - Auth: API keys since Phase 1 (one per agent; only a SHA-256 hash is stored; the key, not the client's self-reported name, determines `source_agent`). OAuth 2.1 in Phase 4. **ChatGPT requires a public HTTPS endpoint with OAuth**, which exposes the whole memory store; it is gated on Phase 4 auth.
-- Secret scanning before writes (Phase 2). Memory is rendered to agents as data, and `trust = external` content is never auto-promoted.
+- Secret filter on writes since Phase 2: `remember` and `handoff` reject content with credentials, hooks redact captured text locally before it is written to disk, and `kenfold scan --redact` cleans memories stored earlier. Memory is rendered to agents as data, and `trust = external` content is never auto-promoted.
 
 ### Defaults chosen
 
@@ -79,7 +79,8 @@ Constraints enforce the invariants that must never be violated by any writer: va
 |---|---|---|
 | 0 | Schema, MCP contract, repo skeleton, compose | `docker compose up` boots; MCP `tools/list` works |
 | 1 | Real storage/search for all types (full-text + vector, RRF), API keys, CLI, client setup for Claude Code / Codex / OpenCode, handoff/resume, exact dedup, supersede | a decision remembered in Claude Code is recalled in Codex (E2E test) |
-| 2 | Write pipeline: extraction/classification, near-duplicate merge, contradiction detection, secret filter, hook-based auto-capture | handoff scenario E2E passes |
+| 2 | Secret filter on writes, normalized dedup, similarity/contradiction hints, hook-based auto-capture of session summaries (Claude Code, Codex), handoff | handoff scenario E2E passes |
+| 2b | Model-based extraction of memories from session logs and type classification (needs a local chat model) | extracted memories reviewed on an internal set |
 | 3 | Graph relations, tree-sitter indexing, commit-based invalidation, recency and graph signals in ranking, rerank | recall@5 target on internal eval set |
 | 4 | OAuth 2.1, HTTPS deployment/tunnel, object storage, ChatGPT, OpenAI-compatible proxy for local LLMs | recall works from ChatGPT |
 | 5 | Consolidation workers, review dashboard, LongMemEval/LoCoMo evals, export/import | ongoing |
