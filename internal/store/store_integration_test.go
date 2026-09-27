@@ -480,6 +480,9 @@ func TestStoreIntegration(t *testing.T) {
 		if _, err := s.FindDuplicate(ctx, "project:ex/norm", memory.TypeProject, "We use pgx v4"); !errors.Is(err, ErrNotFound) {
 			t.Errorf("different fact matched: %v", err)
 		}
+		if got, err := s.FindDuplicate(ctx, "project:ex/norm", "", "we use pgx v5"); err != nil || got.ID != m.ID {
+			t.Errorf("any-type duplicate = %v, %v", got.ID, err)
+		}
 		n := create(t, CreateParams{Type: memory.TypeSemantic, Scope: "user", Content: "no session"})
 		if n.SourceSession != nil {
 			t.Errorf("empty session stored as %q", *n.SourceSession)

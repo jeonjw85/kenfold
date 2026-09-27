@@ -36,9 +36,16 @@ Usage:
   kenfold key revoke <id|prefix>       revoke an API key
 
   kenfold memory list [flags]          list memories (--status, --type, --scope, --limit)
-  kenfold memory approve <id>          approve a proposed memory (e.g. a preference)
+  kenfold memory review [--scope S]    go through proposed memories: approve, reject, or replace
+  kenfold memory approve <id>... [--replaces ID]
+                                       approve proposed memories (optionally replacing an active one)
+  kenfold memory reject <id>... [--reason R]
+                                       reject proposed memories
   kenfold memory forget <id> [--reason R]
                                        soft-delete a memory
+
+  kenfold extract status               progress of memory extraction from session summaries
+  kenfold extract run [--limit N]      extract memories now (needs KENFOLD_CHAT_URL)
 
   kenfold reindex                      embed memories missing an embedding for the configured model
   kenfold scan [--redact]              find (and remove) secrets stored before the secret filter
@@ -59,9 +66,18 @@ Environment:
   KENFOLD_EMBED_URL            OpenAI-compatible embeddings base URL, e.g. http://127.0.0.1:11434/v1
                                (unset: full-text search only)
   KENFOLD_EMBED_MODEL          embedding model            (default ` + config.DefaultEmbedModel + `, must be 1024-dimensional)
+  KENFOLD_EMBED_NAME           model name recorded with vectors, if KENFOLD_EMBED_MODEL is a local alias
   KENFOLD_EMBED_API_KEY        API key for the embeddings provider
   KENFOLD_EMBED_DIMENSIONS     send dimensions=1024 to the provider (default false)
   KENFOLD_SEARCH_MAX_DISTANCE  cosine distance cutoff for vector matches (default 0.55)
+  KENFOLD_CHAT_URL             OpenAI-compatible chat base URL for extraction and classification
+                               (unset: no model-based extraction)
+  KENFOLD_CHAT_MODEL           chat model                 (default ` + config.DefaultChatModel + `)
+  KENFOLD_CHAT_API_KEY         API key for the chat provider
+  KENFOLD_CHAT_REASONING       reasoning_effort sent to the model (default none; omit to leave it out)
+  KENFOLD_EXTRACT              extract memories from session summaries (default: on with a chat model)
+  KENFOLD_EXTRACT_POLICY       propose (review everything) | auto   (default propose)
+  KENFOLD_CLASSIFY             classify memories stored without a type (default: on with a chat model)
   KENFOLD_LOG_LEVEL            debug|info|warn|error      (default info)
 
 Hook environment:
@@ -94,6 +110,7 @@ func usageErr(format string, args ...any) error {
 type cli struct {
 	cfg    config.Config
 	logger *slog.Logger
+	in     io.Reader // interactive input (stdin)
 	out    io.Writer // command output (stdout)
 	errOut io.Writer // diagnostics (stderr)
 }
@@ -125,6 +142,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdin i
 	c := &cli{
 		cfg:    cfg,
 		logger: slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: cfg.LogLevel})),
+		in:     stdin,
 		out:    stdout,
 		errOut: stderr,
 	}
@@ -146,6 +164,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdin i
 		return c.key(ctx, rest)
 	case "memory":
 		return c.memory(ctx, rest)
+	case "extract":
+		return c.extract(ctx, rest)
 	case "reindex":
 		if len(rest) > 0 {
 			return usageErr("reindex takes no arguments")

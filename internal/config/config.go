@@ -52,12 +52,42 @@ type Config struct {
 	Embed Embed
 	// SearchMaxDistance is the cosine distance cutoff for vector matches, in (0, 2].
 	SearchMaxDistance float64
+
+	// Chat configures the chat model used for extraction and classification;
+	// disabled when Chat.URL is empty.
+	Chat Chat
+	// Extract runs the background extractor (default: on when Chat is configured).
+	Extract bool
+	// ExtractPolicy is "propose" (review everything, default) or "auto".
+	ExtractPolicy string
+	// Classify uses the chat model to type memories stored without a type
+	// (default: on when Chat is configured).
+	Classify bool
 }
+
+// Chat configures an OpenAI-compatible chat completions endpoint.
+type Chat struct {
+	URL       string // e.g. http://127.0.0.1:11434/v1 for Ollama
+	Model     string
+	APIKey    string // never logged
+	Reasoning string // reasoning_effort: "none" (default), a level, or "omit"
+}
+
+// Enabled reports whether a chat model is configured.
+func (c Chat) Enabled() bool { return c.URL != "" }
+
+// Chat defaults.
+const (
+	DefaultChatModel = "qwen3.5:4b"
+	ExtractPropose   = "propose"
+	ExtractAuto      = "auto"
+)
 
 // Embed configures an OpenAI-compatible embeddings endpoint.
 type Embed struct {
 	URL            string // e.g. http://127.0.0.1:11434/v1 for Ollama
 	Model          string
+	Name           string // recorded model name when Model is a local alias (default: Model)
 	APIKey         string // never logged
 	SendDimensions bool   // send the "dimensions" parameter (for models not natively 1024-d)
 }
@@ -83,8 +113,16 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 		Embed: Embed{
 			URL:    strings.TrimSpace(getenv("KENFOLD_EMBED_URL")),
 			Model:  envOr(getenv, "KENFOLD_EMBED_MODEL", DefaultEmbedModel),
+			Name:   strings.TrimSpace(getenv("KENFOLD_EMBED_NAME")),
 			APIKey: getenv("KENFOLD_EMBED_API_KEY"),
 		},
+		Chat: Chat{
+			URL:       strings.TrimSpace(getenv("KENFOLD_CHAT_URL")),
+			Model:     envOr(getenv, "KENFOLD_CHAT_MODEL", DefaultChatModel),
+			APIKey:    getenv("KENFOLD_CHAT_API_KEY"),
+			Reasoning: strings.ToLower(envOr(getenv, "KENFOLD_CHAT_REASONING", "none")),
+		},
+		ExtractPolicy: strings.ToLower(envOr(getenv, "KENFOLD_EXTRACT_POLICY", ExtractPropose)),
 	}
 
 	if v := getenv("KENFOLD_ALLOWED_HOSTS"); v != "" {
@@ -136,6 +174,40 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("KENFOLD_SEARCH_MAX_DISTANCE: %q must be a number in (0, 2]", v)
 		}
 		c.SearchMaxDistance = f
+	}
+
+	if c.Chat.URL != "" {
+		u, err := url.Parse(c.Chat.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return Config{}, fmt.Errorf("KENFOLD_CHAT_URL: %q is not an http(s) URL", c.Chat.URL)
+		}
+	}
+	switch c.Chat.Reasoning {
+	case "none", "omit", "minimal", "low", "medium", "high":
+	default:
+		return Config{}, fmt.Errorf("KENFOLD_CHAT_REASONING: %q is not one of none, low, medium, high, omit", c.Chat.Reasoning)
+	}
+	switch c.ExtractPolicy {
+	case ExtractPropose, ExtractAuto:
+	default:
+		return Config{}, fmt.Errorf("KENFOLD_EXTRACT_POLICY: %q is not one of %s, %s", c.ExtractPolicy, ExtractPropose, ExtractAuto)
+	}
+	// Extraction and classification default to on when a chat model is configured.
+	for _, s := range []struct {
+		key string
+		dst *bool
+	}{{"KENFOLD_EXTRACT", &c.Extract}, {"KENFOLD_CLASSIFY", &c.Classify}} {
+		*s.dst = c.Chat.Enabled()
+		if strings.TrimSpace(getenv(s.key)) != "" {
+			b, err := boolEnv(getenv, s.key)
+			if err != nil {
+				return Config{}, err
+			}
+			if b && !c.Chat.Enabled() {
+				return Config{}, fmt.Errorf("%s=true needs a chat model: set KENFOLD_CHAT_URL", s.key)
+			}
+			*s.dst = b
+		}
 	}
 	return c, nil
 }

@@ -86,6 +86,9 @@ func TestNewValidation(t *testing.T) {
 	if err != nil || c.Endpoint() != "http://ollama:11434/v1/embeddings" || c.Model() != "bge-m3" {
 		t.Errorf("New = %v, %v", c, err)
 	}
+	if c, _ := New(Config{BaseURL: "http://x/v1", Model: "kenfold-embed", Name: "bge-m3", Dim: 4}); c.Model() != "bge-m3" {
+		t.Errorf("Name override: Model() = %q", c.Model())
+	}
 }
 
 func TestEmbedBatchingAndOrder(t *testing.T) {

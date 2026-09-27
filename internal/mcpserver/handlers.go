@@ -48,6 +48,7 @@ const (
 type handlers struct {
 	store       *store.Store
 	embedder    store.Embedder
+	classifier  Classifier
 	log         *slog.Logger
 	agent       string
 	maxDistance float64
@@ -58,7 +59,29 @@ func newHandlers(d Deps) *handlers {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &handlers{store: d.Store, embedder: d.Embedder, log: log, agent: d.Agent, maxDistance: d.MaxDistance}
+	return &handlers{store: d.Store, embedder: d.Embedder, classifier: d.Classifier, log: log, agent: d.Agent, maxDistance: d.MaxDistance}
+}
+
+// classifyTimeout bounds type classification on remember. A small local
+// model answers in a few seconds; past this, the scope-based default is used.
+const classifyTimeout = 15 * time.Second
+
+// classify picks a type for a memory stored without one: the classifier's
+// answer when configured and it succeeds, otherwise the scope-based default.
+// It returns the type and where it came from ("model" or "default").
+func (h *handlers) classify(ctx context.Context, content, scope string) (memory.Type, string) {
+	if h.classifier == nil {
+		return defaultType(scope), "default"
+	}
+	cctx, cancel := context.WithTimeout(ctx, classifyTimeout)
+	defer cancel()
+	typ, conf, err := h.classifier.Classify(cctx, content, scope != memory.ScopeUser)
+	if err != nil {
+		h.log.WarnContext(ctx, "type classification failed; using the default type", "err", err)
+		return defaultType(scope), "default"
+	}
+	h.log.DebugContext(ctx, "classified memory", "type", typ, "confidence", conf)
+	return typ, "model"
 }
 
 // ---- remember ----
@@ -79,18 +102,18 @@ func (h *handlers) remember(ctx context.Context, req *mcp.CallToolRequest, in Re
 	if err != nil {
 		return toolError[RememberOutput](err.Error())
 	}
-	typ := in.Type
-	if typ == "" {
-		typ = defaultType(scope)
-	}
-	if typ == memory.TypeTemporary && ttl == 0 {
+	if in.Type == memory.TypeTemporary && ttl == 0 {
 		return toolError[RememberOutput]("ttl_seconds is required for type=temporary")
 	}
+	// Secrets are checked before anything else sees the content (including a
+	// classification model).
 	if fs := secrets.Scan(content); len(fs) > 0 {
 		return h.rejectSecret(ctx, req, "remember", "content", fs)
 	}
 	agent, session := h.agentOf(req), sessionOf(req)
 
+	typ := in.Type
+	typeSource := "agent"
 	var supersedes *string
 	if in.Supersedes != "" {
 		id := strings.TrimSpace(in.Supersedes)
@@ -110,19 +133,27 @@ func (h *handlers) remember(ctx context.Context, req *mcp.CallToolRequest, in Re
 		if old.Status != memory.StatusActive {
 			return toolError[RememberOutput](fmt.Sprintf("supersedes: memory %s is %s, not active; use recall to find the current version", id, old.Status))
 		}
+		if typ == "" {
+			// A replacement is, by default, the same kind of memory.
+			typ, typeSource = old.Type, "superseded"
+		}
 		if old.Type == typ && store.ContentKey(old.Content) == store.ContentKey(content) {
 			// Replacing a memory with the same statement changes nothing.
 			return nil, RememberOutput{ID: old.ID, Type: old.Type, Status: old.Status, Deduplicated: true}, nil
 		}
 		supersedes = &id
 	} else {
-		// Storing the same fact twice returns the existing memory.
+		// Storing the same fact twice returns the existing memory. Without a
+		// type, a duplicate of any type counts (and saves a classification call).
 		dup, err := h.store.FindDuplicate(ctx, scope, typ, content)
 		if err == nil {
 			return nil, RememberOutput{ID: dup.ID, Type: dup.Type, Status: dup.Status, Deduplicated: true}, nil
 		}
 		if !errors.Is(err, store.ErrNotFound) {
 			return nil, RememberOutput{}, h.internal(ctx, "remember", err)
+		}
+		if typ == "" {
+			typ, typeSource = h.classify(ctx, content, scope)
 		}
 		// A session keeps one summary: a later summary from the same agent
 		// session replaces the earlier one (sessions can end more than once,
@@ -137,9 +168,13 @@ func (h *handlers) remember(ctx context.Context, req *mcp.CallToolRequest, in Re
 			}
 		}
 	}
+	if typ == memory.TypeTemporary && ttl == 0 {
+		return toolError[RememberOutput]("ttl_seconds is required for type=temporary")
+	}
 
 	p := store.CreateParams{
 		Type:          typ,
+		Attrs:         map[string]any{"type_source": typeSource},
 		Scope:         scope,
 		Content:       content,
 		SourceAgent:   agent,

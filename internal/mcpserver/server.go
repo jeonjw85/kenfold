@@ -71,7 +71,7 @@ type GetContextOutput struct {
 
 type RememberInput struct {
 	Content    string      `json:"content" jsonschema:"the memory as a self-contained statement that makes sense without this conversation"`
-	Type       memory.Type `json:"type,omitempty" jsonschema:"memory type; if omitted: 'project' when project is given, otherwise 'semantic'"`
+	Type       memory.Type `json:"type,omitempty" jsonschema:"memory type; if omitted the server classifies it (by model when configured, otherwise 'project' when project is given and 'semantic' when not)"`
 	Project    string      `json:"project,omitempty" jsonschema:"git remote URL or project name; omit for user-wide memories"`
 	Supersedes string      `json:"supersedes,omitempty" jsonschema:"id of an existing active memory in the same project that this one replaces"`
 	TTLSeconds int         `json:"ttl_seconds,omitempty" jsonschema:"lifetime in seconds (max 1 year); required for type=temporary"`
@@ -147,6 +147,14 @@ type Deps struct {
 	// MaxDistance is the cosine distance cutoff for vector matches
 	// (store.DefaultMaxDistance when zero).
 	MaxDistance float64
+	// Classifier, if set, picks the type of memories stored without one.
+	// Without it (or when it fails) the type defaults by scope.
+	Classifier Classifier
+}
+
+// Classifier picks a memory type for content (see extract.Classify).
+type Classifier interface {
+	Classify(ctx context.Context, content string, hasProject bool) (memory.Type, float64, error)
 }
 
 // New builds the Kenfold MCP server with all tools registered.

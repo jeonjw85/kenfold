@@ -172,14 +172,15 @@ func ContentKey(content string) string {
 }
 
 // FindDuplicate returns an active or proposed, unexpired memory in the same
-// scope and type whose content differs from content only in case, whitespace,
-// or trailing punctuation (see content_key in migrations), or ErrNotFound. It
-// lets remember be idempotent when agents store the same fact again.
+// scope and type (any type when typ is "") whose content differs from content
+// only in case, whitespace, or trailing punctuation (see content_key in
+// migrations), or ErrNotFound. It lets remember be idempotent when agents
+// store the same fact again.
 func (s *Store) FindDuplicate(ctx context.Context, scope string, typ memory.Type, content string) (Memory, error) {
 	var m Memory
 	err := scan(s.pool.QueryRow(ctx, `
 		SELECT `+columns+` FROM memory
-		WHERE scope = $1 AND type = $2
+		WHERE scope = $1 AND ($2 = '' OR type = $2)
 		  AND content_key = lower(regexp_replace(regexp_replace(btrim($3::text), '\s+', ' ', 'g'), '[.!。]+$', ''))
 		  AND status IN ('active', 'proposed')
 		  AND (expires_at IS NULL OR expires_at > now())
@@ -507,6 +508,8 @@ type SimilarParams struct {
 	// MinTrigram is the pg_trgm similarity cutoff (default 0.5).
 	MinTrigram float64
 	Limit      int // default 3
+
+	includeProposed bool // see SimilarAny
 }
 
 // Similar returns active memories in the same scope whose content is close to
@@ -534,21 +537,25 @@ func (s *Store) Similar(ctx context.Context, p SimilarParams) ([]Scored, error) 
 		}
 		exclude = &p.Exclude
 	}
+	statuses := []string{"active"}
+	if p.includeProposed {
+		statuses = append(statuses, "proposed")
+	}
 	// $1 scope, $2 content, $3 exclude, $4 vector, $5 model, $6 max distance,
-	// $7 min trigram similarity, $8 limit.
+	// $7 min trigram similarity, $8 limit, $9 statuses.
 	rows, err := s.pool.Query(ctx, `
 		WITH cand AS (
 		    SELECT m.id, 1 - (m.embedding <=> $4::text::vector) AS sim
 		    FROM memory m
 		    WHERE $4::text IS NOT NULL AND m.embedding IS NOT NULL AND m.embedding_model = $5
-		      AND m.scope = $1 AND m.status = 'active'
+		      AND m.scope = $1 AND m.status = ANY($9)
 		      AND (m.expires_at IS NULL OR m.expires_at > now())
 		      AND ($3::uuid IS NULL OR m.id <> $3::uuid)
 		      AND m.embedding <=> $4::text::vector <= $6
 		    UNION ALL
 		    SELECT m.id, similarity(m.content, $2) AS sim
 		    FROM memory m
-		    WHERE m.scope = $1 AND m.status = 'active'
+		    WHERE m.scope = $1 AND m.status = ANY($9)
 		      AND (m.expires_at IS NULL OR m.expires_at > now())
 		      AND ($3::uuid IS NULL OR m.id <> $3::uuid)
 		      AND m.content % $2
@@ -560,7 +567,7 @@ func (s *Store) Similar(ctx context.Context, p SimilarParams) ([]Scored, error) 
 		WHERE m.type <> 'temporary'
 		ORDER BY b.sim DESC, m.created_at DESC
 		LIMIT $8`,
-		p.Scope, p.Content, exclude, vec, p.Model, maxDist, minTrgm, limit)
+		p.Scope, p.Content, exclude, vec, p.Model, maxDist, minTrgm, limit, statuses)
 	if err != nil {
 		return nil, fmt.Errorf("similar: %w", err)
 	}

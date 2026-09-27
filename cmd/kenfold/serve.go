@@ -15,8 +15,10 @@ import (
 
 	"github.com/kenfold/kenfold/internal/apikey"
 	"github.com/kenfold/kenfold/internal/buildinfo"
+	"github.com/kenfold/kenfold/internal/chat"
 	"github.com/kenfold/kenfold/internal/config"
 	"github.com/kenfold/kenfold/internal/embed"
+	"github.com/kenfold/kenfold/internal/extract"
 	"github.com/kenfold/kenfold/internal/httpserver"
 	"github.com/kenfold/kenfold/internal/mcpserver"
 	"github.com/kenfold/kenfold/internal/store"
@@ -28,8 +30,10 @@ const (
 	// embedding provider was unavailable.
 	backfillInterval = 5 * time.Minute
 	backfillBatch    = 64
-	probeTimeout     = 15 * time.Second
-	schemaTimeout    = 10 * time.Second
+	// extractInterval is how often `serve` looks for new session summaries.
+	extractInterval = time.Minute
+	probeTimeout    = 15 * time.Second
+	schemaTimeout   = 10 * time.Second
 )
 
 // runtime holds the long-lived dependencies shared by the servers.
@@ -38,6 +42,7 @@ type runtime struct {
 	store    *store.Store
 	keys     *apikey.Store
 	embedder *embed.Client // nil when embeddings are disabled
+	chat     *chat.Client  // nil when no chat model is configured
 }
 
 func newRuntime(ctx context.Context, cfg config.Config) (*runtime, error) {
@@ -50,6 +55,7 @@ func newRuntime(ctx context.Context, cfg config.Config) (*runtime, error) {
 		rt.embedder, err = embed.New(embed.Config{
 			BaseURL:        cfg.Embed.URL,
 			Model:          cfg.Embed.Model,
+			Name:           cfg.Embed.Name,
 			APIKey:         cfg.Embed.APIKey,
 			Dim:            store.EmbeddingDim,
 			SendDimensions: cfg.Embed.SendDimensions,
@@ -59,7 +65,35 @@ func newRuntime(ctx context.Context, cfg config.Config) (*runtime, error) {
 			return nil, err
 		}
 	}
+	if cfg.Chat.Enabled() {
+		rt.chat, err = chat.New(chat.Config{
+			BaseURL:   cfg.Chat.URL,
+			Model:     cfg.Chat.Model,
+			APIKey:    cfg.Chat.APIKey,
+			Reasoning: cfg.Chat.Reasoning,
+		})
+		if err != nil {
+			pool.Close()
+			return nil, err
+		}
+	}
 	return rt, nil
+}
+
+// classifier returns the memory-type classifier, or nil when disabled.
+func (rt *runtime) classifier(cfg config.Config) mcpserver.Classifier {
+	if rt.chat == nil || !cfg.Classify {
+		return nil
+	}
+	return extract.Classifier{Chat: rt.chat}
+}
+
+// extractor returns the background extraction worker, or nil when disabled.
+func (rt *runtime) extractor(cfg config.Config, logger *slog.Logger) *extract.Worker {
+	if rt.chat == nil || !cfg.Extract {
+		return nil
+	}
+	return &extract.Worker{Store: rt.store, Chat: rt.chat, Embedder: rt.embedderIface(), Logger: logger, Policy: cfg.ExtractPolicy}
 }
 
 func (rt *runtime) Close() { rt.pool.Close() }
@@ -79,6 +113,7 @@ func httpHandler(cfg config.Config, rt *runtime, logger *slog.Logger) http.Handl
 	deps := mcpserver.Deps{
 		Store:       rt.store,
 		Embedder:    rt.embedderIface(),
+		Classifier:  rt.classifier(cfg),
 		Logger:      logger,
 		MaxDistance: cfg.SearchMaxDistance,
 	}
@@ -128,6 +163,13 @@ func (c *cli) serve(ctx context.Context) error {
 		})
 	} else {
 		c.logger.Info("embeddings disabled (KENFOLD_EMBED_URL unset); using full-text search only")
+	}
+	if rt.chat != nil {
+		c.logger.Info("chat model configured", "endpoint", rt.chat.Endpoint(), "model", rt.chat.Model(),
+			"extract", c.cfg.Extract, "extract_policy", c.cfg.ExtractPolicy, "classify", c.cfg.Classify)
+	}
+	if w := rt.extractor(c.cfg, c.logger); w != nil {
+		wg.Go(func() { w.Loop(bgCtx, extractInterval) })
 	}
 
 	srv := &http.Server{
@@ -224,6 +266,7 @@ func (c *cli) serveStdio(ctx context.Context) error {
 		Embedder:    rt.embedderIface(),
 		Logger:      c.logger,
 		Agent:       c.cfg.Agent,
+		Classifier:  rt.classifier(c.cfg),
 		MaxDistance: c.cfg.SearchMaxDistance,
 	})
 	err = s.Run(ctx, &mcp.StdioTransport{})

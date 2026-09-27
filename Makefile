@@ -7,12 +7,14 @@ LDFLAGS := -s -w -X $(PKG).Version=$(VERSION) -X $(PKG).Commit=$(COMMIT) -X $(PK
 TEST_DB     := kenfold_test
 TEST_DB_URL := postgres://kenfold:$${KENFOLD_DB_PASSWORD:-kenfold}@127.0.0.1:54329/$(TEST_DB)?sslmode=disable
 
-EMBED_MODEL ?= bge-m3
+EMBED_MODEL     ?= bge-m3
+CHAT_MODEL      ?= qwen3.5:4b
+EXTRACT_MODEL   ?= kenfold-extract
 BUILD_ENV   := VERSION=$(VERSION) COMMIT=$(COMMIT) DATE=$(DATE)
 # Runs the kenfold binary inside the running container (it has the database URL).
 KENFOLD_CLI := docker compose exec -T kenfold /usr/local/bin/kenfold
 
-.PHONY: build test test-integration lint fmt up up-embed down logs migrate key keys reindex clean
+.PHONY: build test test-integration lint fmt up up-embed up-extract down logs migrate key keys reindex review eval clean
 
 build: ## Build ./bin/kenfold
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/kenfold ./cmd/kenfold
@@ -36,10 +38,30 @@ fmt:
 up: ## Start Postgres + Kenfold with full-text search (builds the image)
 	$(BUILD_ENV) docker compose up -d --build --wait
 
+# The compose Ollama runs on CPU with one thread per CPU by default. On CPUs
+# with performance and efficiency cores (e.g. Apple Silicon) that is far
+# slower: measured on an M5, bge-m3 took 3.3 s per embedding instead of 0.1 s,
+# and qwen3.5:4b generated 0.3 instead of ~25 tokens/s. The derived models only
+# pin the thread count (outputs are identical); set THREADS to your number of
+# performance cores. KENFOLD_EMBED_NAME keeps recording vectors as bge-m3.
+THREADS ?= 4
+derive = docker compose exec -T ollama sh -c 'printf "FROM %s\nPARAMETER num_thread %s\n%b" "$(1)" "$(THREADS)" "$(3)" > /tmp/Modelfile && ollama create $(2) -f /tmp/Modelfile'
+
 up-embed: ## Start Postgres + Ollama + Kenfold with hybrid search (first run downloads bge-m3, ~1.2 GB)
 	docker compose --profile embed up -d --wait postgres ollama
 	docker compose exec -T ollama ollama pull $(EMBED_MODEL)
-	$(BUILD_ENV) KENFOLD_EMBED_URL=http://ollama:11434/v1 KENFOLD_EMBED_MODEL=$(EMBED_MODEL) \
+	$(call derive,$(EMBED_MODEL),kenfold-embed,)
+	$(BUILD_ENV) KENFOLD_EMBED_URL=http://ollama:11434/v1 KENFOLD_EMBED_MODEL=kenfold-embed KENFOLD_EMBED_NAME=$(EMBED_MODEL) \
+	  docker compose --profile embed up -d --build --wait
+
+up-extract: ## up-embed + a local chat model for memory extraction (first run downloads qwen3.5:4b, ~3.4 GB)
+	docker compose --profile embed up -d --wait postgres ollama
+	docker compose exec -T ollama ollama pull $(EMBED_MODEL)
+	docker compose exec -T ollama ollama pull $(CHAT_MODEL)
+	$(call derive,$(EMBED_MODEL),kenfold-embed,)
+	$(call derive,$(CHAT_MODEL),$(EXTRACT_MODEL),PARAMETER num_ctx 8192\nPARAMETER temperature 0\n)
+	$(BUILD_ENV) KENFOLD_EMBED_URL=http://ollama:11434/v1 KENFOLD_EMBED_MODEL=kenfold-embed KENFOLD_EMBED_NAME=$(EMBED_MODEL) \
+	  KENFOLD_CHAT_URL=http://ollama:11434/v1 KENFOLD_CHAT_MODEL=$(EXTRACT_MODEL) \
 	  docker compose --profile embed up -d --build --wait
 
 down: ## Stop the stack, including Ollama (data volumes are kept)
@@ -60,6 +82,13 @@ keys: ## List API keys
 
 reindex: ## Embed memories that have no embedding for the configured model
 	$(KENFOLD_CLI) reindex
+
+review: ## Review proposed memories (extracted memories, preferences) interactively
+	docker compose exec kenfold /usr/local/bin/kenfold memory review
+
+eval: ## Measure extraction and classification on the internal eval set (needs `make up-extract`)
+	KENFOLD_EVAL_CHAT_URL=http://127.0.0.1:11435/v1 KENFOLD_EVAL_CHAT_MODEL=$(EXTRACT_MODEL) \
+	  go test -count=1 -run TestEvalModel -v -timeout 30m ./internal/extract/
 
 clean:
 	rm -rf bin

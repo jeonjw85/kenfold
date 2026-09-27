@@ -123,36 +123,18 @@ func (c *cli) key(ctx context.Context, args []string) error {
 
 func (c *cli) memory(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return usageErr("memory: missing subcommand (list|approve|forget)")
+		return usageErr("memory: missing subcommand (list|review|approve|reject|forget)")
 	}
 	sub, args := args[0], args[1:]
 	switch sub {
 	case "list":
 		return c.memoryList(ctx, args)
+	case "review":
+		return c.review(ctx, args, c.in)
 	case "approve":
-		pos, err := parseArgs(flag.NewFlagSet("memory approve", flag.ContinueOnError), args)
-		if err != nil {
-			return err
-		}
-		if len(pos) != 1 || !store.ValidID(pos[0]) {
-			return usageErr("memory approve takes exactly one memory id")
-		}
-		rt, err := c.connect(ctx)
-		if err != nil {
-			return err
-		}
-		defer rt.Close()
-		m, err := rt.store.Approve(ctx, pos[0])
-		switch {
-		case errors.Is(err, store.ErrNotFound):
-			return fmt.Errorf("memory %s not found", pos[0])
-		case errors.Is(err, store.ErrNotProposed):
-			return fmt.Errorf("memory %s cannot be approved: %w", pos[0], err)
-		case err != nil:
-			return err
-		}
-		fmt.Fprintf(c.out, "approved %s (%s, %s): %s\n", m.ID, m.Type, m.Scope, oneLine(m.Content, 100))
-		return nil
+		return c.approveMany(ctx, args)
+	case "reject":
+		return c.rejectMany(ctx, args)
 	case "forget":
 		fs := flag.NewFlagSet("memory forget", flag.ContinueOnError)
 		reason := fs.String("reason", "", "why the memory is wrong or no longer needed")
@@ -178,7 +160,7 @@ func (c *cli) memory(ctx context.Context, args []string) error {
 		fmt.Fprintf(c.out, "forgot %s (%s): %s\n", m.ID, m.Type, oneLine(m.Content, 100))
 		return nil
 	}
-	return usageErr("unknown memory subcommand %q (want list|approve|forget)", sub)
+	return usageErr("unknown memory subcommand %q (want list|review|approve|reject|forget)", sub)
 }
 
 func (c *cli) memoryList(ctx context.Context, args []string) error {

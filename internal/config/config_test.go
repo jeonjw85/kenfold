@@ -43,6 +43,7 @@ func TestLoadOverrides(t *testing.T) {
 		"KENFOLD_AGENT":               "claude-code",
 		"KENFOLD_EMBED_URL":           "http://ollama:11434/v1",
 		"KENFOLD_EMBED_MODEL":         "text-embedding-3-large",
+		"KENFOLD_EMBED_NAME":          "te3l",
 		"KENFOLD_EMBED_API_KEY":       "sk-secret",
 		"KENFOLD_EMBED_DIMENSIONS":    "true",
 		"KENFOLD_SEARCH_MAX_DISTANCE": "0.4",
@@ -59,14 +60,43 @@ func TestLoadOverrides(t *testing.T) {
 	if c.Auth != AuthNone || c.Agent != "claude-code" {
 		t.Errorf("auth/agent = %q/%q", c.Auth, c.Agent)
 	}
-	want := Embed{URL: "http://ollama:11434/v1", Model: "text-embedding-3-large", APIKey: "sk-secret", SendDimensions: true}
+	want := Embed{URL: "http://ollama:11434/v1", Model: "text-embedding-3-large", Name: "te3l", APIKey: "sk-secret", SendDimensions: true}
 	if c.Embed != want || !c.Embed.Enabled() || c.SearchMaxDistance != 0.4 {
 		t.Errorf("embed = %+v, max distance %v", c.Embed, c.SearchMaxDistance)
 	}
 }
 
+func TestChatConfig(t *testing.T) {
+	c, err := LoadFrom(env(nil))
+	if err != nil || c.Chat.Enabled() || c.Extract || c.Classify || c.Chat.Model != DefaultChatModel || c.Chat.Reasoning != "none" || c.ExtractPolicy != ExtractPropose {
+		t.Errorf("defaults: %+v %v", c.Chat, err)
+	}
+	// A chat URL turns extraction and classification on by default.
+	c, err = LoadFrom(env(map[string]string{"KENFOLD_CHAT_URL": "http://ollama:11434/v1"}))
+	if err != nil || !c.Extract || !c.Classify {
+		t.Errorf("enabled defaults: extract %v classify %v %v", c.Extract, c.Classify, err)
+	}
+	c, err = LoadFrom(env(map[string]string{
+		"KENFOLD_CHAT_URL": "http://ollama:11434/v1", "KENFOLD_CHAT_MODEL": "kenfold-extract", "KENFOLD_CHAT_API_KEY": "sk-x",
+		"KENFOLD_CHAT_REASONING": "OMIT", "KENFOLD_EXTRACT": "false", "KENFOLD_CLASSIFY": "true", "KENFOLD_EXTRACT_POLICY": "Auto",
+	}))
+	if err != nil || c.Extract || !c.Classify || c.Chat.Model != "kenfold-extract" || c.Chat.APIKey != "sk-x" || c.Chat.Reasoning != "omit" || c.ExtractPolicy != ExtractAuto {
+		t.Errorf("overrides: %+v extract %v classify %v policy %s %v", c.Chat, c.Extract, c.Classify, c.ExtractPolicy, err)
+	}
+	// Explicitly disabling without a chat model is fine.
+	if _, err := LoadFrom(env(map[string]string{"KENFOLD_EXTRACT": "false"})); err != nil {
+		t.Errorf("EXTRACT=false without chat: %v", err)
+	}
+}
+
 func TestLoadInvalid(t *testing.T) {
 	for _, m := range []map[string]string{
+		{"KENFOLD_CHAT_URL": "ollama:11434"},
+		{"KENFOLD_CHAT_URL": "http://x/v1", "KENFOLD_CHAT_REASONING": "maximum"},
+		{"KENFOLD_EXTRACT_POLICY": "yolo"},
+		{"KENFOLD_EXTRACT": "true"},  // no chat model
+		{"KENFOLD_CLASSIFY": "true"}, // no chat model
+		{"KENFOLD_CHAT_URL": "http://x/v1", "KENFOLD_EXTRACT": "perhaps"},
 		{"KENFOLD_AUTO_MIGRATE": "maybe"},
 		{"KENFOLD_LOG_LEVEL": "loud"},
 		{"KENFOLD_ALLOWED_HOSTS": " , "},

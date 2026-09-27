@@ -3,6 +3,7 @@
 #
 #   make up          Postgres + Kenfold (full-text search)
 #   make up-embed    + Ollama with bge-m3 for hybrid (full-text + vector) search
+#   make up-extract  + a local chat model for memory extraction and classification
 name: kenfold
 
 services:
@@ -43,7 +44,14 @@ services:
       # ollama service; for Ollama running natively on the host use http://host.docker.internal:11434/v1.
       KENFOLD_EMBED_URL: ${KENFOLD_EMBED_URL:-}
       KENFOLD_EMBED_MODEL: ${KENFOLD_EMBED_MODEL:-bge-m3}
+      KENFOLD_EMBED_NAME: ${KENFOLD_EMBED_NAME:-}
       KENFOLD_EMBED_API_KEY: ${KENFOLD_EMBED_API_KEY:-}
+      # Memory extraction and classification are off unless KENFOLD_CHAT_URL is set
+      # (`make up-extract` points it at the ollama service).
+      KENFOLD_CHAT_URL: ${KENFOLD_CHAT_URL:-}
+      KENFOLD_CHAT_MODEL: ${KENFOLD_CHAT_MODEL:-qwen3.5:4b}
+      KENFOLD_CHAT_API_KEY: ${KENFOLD_CHAT_API_KEY:-}
+      KENFOLD_EXTRACT_POLICY: ${KENFOLD_EXTRACT_POLICY:-propose}
       KENFOLD_LOG_LEVEL: ${KENFOLD_LOG_LEVEL:-info}
     ports:
       - "127.0.0.1:7077:7077"

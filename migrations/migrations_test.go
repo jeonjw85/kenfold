@@ -135,12 +135,31 @@ func TestMigrationsIntegration(t *testing.T) {
 		t.Errorf("pg_trgm similarity = %v, %v", sim, err)
 	}
 
+	// 00004: extraction rows reference memories and cascade on delete.
+	var epi string
+	if err := db.QueryRowContext(ctx, `INSERT INTO memory (type, scope, content, source_agent) VALUES ('episodic', 'user', 'session', 't') RETURNING id`).Scan(&epi); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec(`INSERT INTO extraction (source_id, status, attempts) VALUES ($1, 'running', 1)`, epi); err != nil {
+		t.Fatalf("insert extraction: %v", err)
+	}
+	if err := exec(`INSERT INTO extraction (source_id, status) VALUES ($1, 'queued')`, id); err == nil {
+		t.Error("unknown extraction status accepted")
+	}
+	if err := exec(`DELETE FROM memory WHERE id = $1`, epi); err != nil {
+		t.Fatal(err)
+	}
+	var jobs int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM extraction`).Scan(&jobs); err != nil || jobs != 0 {
+		t.Errorf("extraction rows after cascade = %d, %v", jobs, err)
+	}
+
 	// Down must fully revert.
 	if _, err := p.DownTo(ctx, 0); err != nil {
 		t.Fatalf("down: %v", err)
 	}
 	var tables int
-	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pg_tables WHERE tablename IN ('memory', 'memory_edge', 'api_key')`).Scan(&tables); err != nil || tables != 0 {
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pg_tables WHERE tablename IN ('memory', 'memory_edge', 'api_key', 'extraction')`).Scan(&tables); err != nil || tables != 0 {
 		t.Errorf("tables after down = %d, %v; want 0", tables, err)
 	}
 	// Leave the schema migrated for manual inspection.

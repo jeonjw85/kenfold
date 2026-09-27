@@ -37,6 +37,12 @@ type Config struct {
 	BaseURL string
 	// Model name, e.g. bge-m3 or text-embedding-3-large.
 	Model string
+	// Name records which model produced a vector (memory.embedding_model).
+	// Defaults to Model. Set it when Model is a local alias of another model
+	// with identical output (e.g. an Ollama model derived from bge-m3 that
+	// only changes the thread count), so switching between them does not
+	// trigger re-embedding.
+	Name string
 	// APIKey is sent as a bearer token when set. Ollama ignores it.
 	APIKey string
 	// Dim is the required embedding dimension; responses of any other size are rejected.
@@ -86,8 +92,14 @@ func New(cfg Config) (*Client, error) {
 	return &Client{endpoint: u.String(), cfg: cfg, http: hc}, nil
 }
 
-// Model returns the configured model name; it is recorded with each vector.
-func (c *Client) Model() string { return c.cfg.Model }
+// Model returns the name recorded with each vector (Config.Name, or the
+// requested model).
+func (c *Client) Model() string {
+	if c.cfg.Name != "" {
+		return c.cfg.Name
+	}
+	return c.cfg.Model
+}
 
 // Endpoint returns the full embeddings URL (for logs; contains no secrets
 // unless the base URL itself embeds credentials).

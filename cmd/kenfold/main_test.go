@@ -111,6 +111,15 @@ func TestCLIUsageErrors(t *testing.T) {
 		{"memory", "list", "positional"},
 		{"memory", "approve"},
 		{"memory", "approve", "not-a-uuid"},
+		{"memory", "approve", "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222", "--replaces", "33333333-3333-3333-3333-333333333333"},
+		{"memory", "reject"},
+		{"memory", "reject", "nope"},
+		{"memory", "review", "positional"},
+		{"memory", "review", "--limit", "0"},
+		{"extract"},
+		{"extract", "go"},
+		{"extract", "status", "extra"},
+		{"extract", "run", "--limit", "0"},
 		{"memory", "forget", "not-a-uuid"},
 	} {
 		_, _, err := runCLI(t, nil, args...)
