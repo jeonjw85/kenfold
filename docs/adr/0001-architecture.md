@@ -48,7 +48,7 @@ Key columns: `scope` (`user` \| `project:<id>` \| `repo:<id>`), provenance (`sou
 
 Constraints enforce the invariants that must never be violated by any writer: valid enum values, temporary memories must have a TTL, confidence in [0,1], validity ranges ordered, no self-referencing edges.
 
-**Embedding dimension is fixed at 1024** (default model: `bge-m3`, multilingual; Korean and English mix in practice). Changing models requires a migration plus re-embedding.
+**Embedding dimension is fixed at 1024** (default model: `bge-m3`, multilingual; Korean and English mix in practice). `memory.embedding_model` records which model produced each vector, and search only compares vectors from the configured model, so switching to another 1024-dimensional model needs no migration: memories are re-embedded in the background. A different dimension requires a migration.
 
 **Project identity** is the normalized git remote URL, so the same repo maps to the same project across agents and machines.
 
@@ -65,7 +65,7 @@ Constraints enforce the invariants that must never be violated by any writer: va
 
 - Phase 0–1 are **local only**: bind to loopback; compose publishes ports on `127.0.0.1` only.
 - `/mcp` enforces a Host allowlist (DNS-rebinding defense) and rejects cross-origin browser requests. The SDK's built-in rebinding check only applies to connections arriving on a loopback address, which is not the case behind Docker port publishing, so Kenfold enforces its own.
-- Auth: API keys in Phase 1, OAuth 2.1 in Phase 4. **ChatGPT requires a public HTTPS endpoint with OAuth**, which exposes the whole memory store; it is gated on Phase 4 auth.
+- Auth: API keys since Phase 1 (one per agent; only a SHA-256 hash is stored; the key, not the client's self-reported name, determines `source_agent`). OAuth 2.1 in Phase 4. **ChatGPT requires a public HTTPS endpoint with OAuth**, which exposes the whole memory store; it is gated on Phase 4 auth.
 - Secret scanning before writes (Phase 2). Memory is rendered to agents as data, and `trust = external` content is never auto-promoted.
 
 ### Defaults chosen
@@ -78,14 +78,14 @@ Constraints enforce the invariants that must never be violated by any writer: va
 | Phase | Scope | Done when |
 |---|---|---|
 | 0 | Schema, MCP contract, repo skeleton, compose | `docker compose up` boots; MCP `tools/list` works |
-| 1 | Real storage/search for all types, API keys, CLI, client setup for Claude Code / Codex / OpenCode | a decision remembered in Claude Code is recalled in Codex (E2E test) |
-| 2 | Write pipeline: extraction/classification, dedup, supersede, secret filter, hook-based auto-capture, handoff | handoff scenario E2E passes |
-| 3 | Graph relations, tree-sitter indexing, commit-based invalidation, hybrid search (BM25 + vector + graph + recency), rerank | recall@5 target on internal eval set |
+| 1 | Real storage/search for all types (full-text + vector, RRF), API keys, CLI, client setup for Claude Code / Codex / OpenCode, handoff/resume, exact dedup, supersede | a decision remembered in Claude Code is recalled in Codex (E2E test) |
+| 2 | Write pipeline: extraction/classification, near-duplicate merge, contradiction detection, secret filter, hook-based auto-capture | handoff scenario E2E passes |
+| 3 | Graph relations, tree-sitter indexing, commit-based invalidation, recency and graph signals in ranking, rerank | recall@5 target on internal eval set |
 | 4 | OAuth 2.1, HTTPS deployment/tunnel, object storage, ChatGPT, OpenAI-compatible proxy for local LLMs | recall works from ChatGPT |
 | 5 | Consolidation workers, review dashboard, LongMemEval/LoCoMo evals, export/import | ongoing |
 
 ## Consequences
 
 - Postgres is a hard dependency even for a single user. Accepted: it is what makes transactions over memory + graph + vectors possible. An embedded mode (e.g. SQLite) may be considered later for zero-setup installs.
-- Fixed embedding dimension makes model changes a deliberate migration.
+- A fixed embedding dimension makes changing to a model of a different size a deliberate migration; same-size model changes only re-embed.
 - MCP is the primary contract; a REST API will be added for the dashboard and non-MCP integrations, backed by the same service layer.

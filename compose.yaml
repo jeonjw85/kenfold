@@ -1,5 +1,8 @@
-# Local development stack. Both ports are published on 127.0.0.1 only:
-# Phase 0 has no authentication, and these credentials are for local use only.
+# Local stack. Every port is published on 127.0.0.1 only, and the database
+# credentials are for local use only.
+#
+#   make up          Postgres + Kenfold (full-text search)
+#   make up-embed    + Ollama with bge-m3 for hybrid (full-text + vector) search
 name: kenfold
 
 services:
@@ -34,13 +37,44 @@ services:
     environment:
       KENFOLD_DATABASE_URL: postgres://kenfold:${KENFOLD_DB_PASSWORD:-kenfold}@postgres:5432/kenfold?sslmode=disable
       KENFOLD_AUTO_MIGRATE: "true"
+      # Every /mcp request needs "Authorization: Bearer <key>"; create keys with `make key AGENT=...`.
+      KENFOLD_AUTH: ${KENFOLD_AUTH:-apikey}
+      # Embeddings are off unless KENFOLD_EMBED_URL is set. `make up-embed` points it at the
+      # ollama service; for Ollama running natively on the host use http://host.docker.internal:11434/v1.
+      KENFOLD_EMBED_URL: ${KENFOLD_EMBED_URL:-}
+      KENFOLD_EMBED_MODEL: ${KENFOLD_EMBED_MODEL:-bge-m3}
+      KENFOLD_EMBED_API_KEY: ${KENFOLD_EMBED_API_KEY:-}
       KENFOLD_LOG_LEVEL: ${KENFOLD_LOG_LEVEL:-info}
     ports:
       - "127.0.0.1:7077:7077"
+    extra_hosts:
+      # Lets the container reach services on the host (e.g. native Ollama) on Linux too.
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
     restart: unless-stopped
 
+  # Optional local embedding server. Started only with the "embed" profile.
+  ollama:
+    image: ollama/ollama:0.34.4
+    profiles: [embed]
+    environment:
+      # Keep the model loaded; reloading it after the default 5 minutes makes the next call slow.
+      OLLAMA_KEEP_ALIVE: 24h
+    ports:
+      # 11435 on the host so it does not collide with a native Ollama on 11434.
+      - "127.0.0.1:11435:11434"
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 5s
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  ollama:
