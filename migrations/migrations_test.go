@@ -121,6 +121,20 @@ func TestMigrationsIntegration(t *testing.T) {
 		}
 	}
 
+	// 00003: content_key normalizes case, whitespace, and trailing punctuation.
+	var key string
+	if err := db.QueryRowContext(ctx, `INSERT INTO memory (type, scope, content, source_agent)
+		VALUES ('semantic', 'user', E'  We  use\tPGX v5.  ', 't') RETURNING content_key`).Scan(&key); err != nil {
+		t.Fatalf("content_key: %v", err)
+	}
+	if key != "we use pgx v5" {
+		t.Errorf("content_key = %q", key)
+	}
+	var sim float64
+	if err := db.QueryRowContext(ctx, `SELECT similarity('deploy on fridays', 'we deploy on fridays')`).Scan(&sim); err != nil || sim <= 0 {
+		t.Errorf("pg_trgm similarity = %v, %v", sim, err)
+	}
+
 	// Down must fully revert.
 	if _, err := p.DownTo(ctx, 0); err != nil {
 		t.Fatalf("down: %v", err)

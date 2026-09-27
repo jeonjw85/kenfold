@@ -290,6 +290,13 @@ func TestStoreIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("handoff session", func(t *testing.T) {
+		h, err := s.CreateHandoff(ctx, HandoffParams{Scope: "project:ex/hs", Summary: "s", SourceAgent: "codex", SourceSession: "sess-9", ExpiresAt: time.Now().Add(time.Hour)})
+		if err != nil || h.SourceSession == nil || *h.SourceSession != "sess-9" {
+			t.Errorf("handoff session = %v, %v", h.SourceSession, err)
+		}
+	})
+
 	t.Run("lexical search", func(t *testing.T) {
 		scope := "project:ex/search"
 		pipeline := create(t, CreateParams{Type: memory.TypeProject, Scope: scope, Content: "The deployment pipeline uses GitHub Actions and Docker"})
@@ -456,6 +463,123 @@ func TestStoreIntegration(t *testing.T) {
 		}
 		if _, err := s.LatestHandoff(ctx, "project:ex/expired", false); !errors.Is(err, ErrNotFound) {
 			t.Errorf("expired handoff returned: %v", err)
+		}
+	})
+
+	t.Run("normalized duplicate and session", func(t *testing.T) {
+		m := create(t, CreateParams{Type: memory.TypeProject, Scope: "project:ex/norm", Content: "We use pgx v5.", SourceSession: "sess-1"})
+		if m.SourceSession == nil || *m.SourceSession != "sess-1" {
+			t.Errorf("source_session = %v", m.SourceSession)
+		}
+		for _, variant := range []string{"we use PGX v5", "  We  use pgx\tv5!! ", "We use pgx v5"} {
+			got, err := s.FindDuplicate(ctx, "project:ex/norm", memory.TypeProject, variant)
+			if err != nil || got.ID != m.ID {
+				t.Errorf("FindDuplicate(%q) = %v, %v", variant, got.ID, err)
+			}
+		}
+		if _, err := s.FindDuplicate(ctx, "project:ex/norm", memory.TypeProject, "We use pgx v4"); !errors.Is(err, ErrNotFound) {
+			t.Errorf("different fact matched: %v", err)
+		}
+		n := create(t, CreateParams{Type: memory.TypeSemantic, Scope: "user", Content: "no session"})
+		if n.SourceSession != nil {
+			t.Errorf("empty session stored as %q", *n.SourceSession)
+		}
+	})
+
+	t.Run("similar", func(t *testing.T) {
+		scope := "project:ex/similar"
+		fri := create(t, CreateParams{Type: memory.TypeProject, Scope: scope, Content: "We deploy on Fridays after the release review",
+			Embedding: bagOfWords("We deploy on Fridays after the release review"), EmbeddingModel: "fake-v1"})
+		create(t, CreateParams{Type: memory.TypeProject, Scope: scope, Content: "Integration tests need the compose Postgres",
+			Embedding: bagOfWords("Integration tests need the compose Postgres"), EmbeddingModel: "fake-v1"})
+		other := create(t, CreateParams{Type: memory.TypeProject, Scope: "project:ex/elsewhere2", Content: "We deploy on Fridays after the release review"})
+
+		// Lexical path only (no vector).
+		got, err := s.Similar(ctx, SimilarParams{Scope: scope, Content: "We never deploy on Fridays after the release review"})
+		if err != nil || len(got) != 1 || got[0].ID != fri.ID || got[0].Score < 0.5 {
+			t.Fatalf("lexical similar = %v (score %v), %v", contents(got), scoreOf(got), err)
+		}
+		for _, r := range got {
+			if r.ID == other.ID {
+				t.Error("similar leaked another scope")
+			}
+		}
+		// Vector path, and Exclude.
+		q := "deploy fridays release review"
+		got, err = s.Similar(ctx, SimilarParams{Scope: scope, Content: q, Vector: bagOfWords(q), Model: "fake-v1", MaxDistance: 0.5})
+		if err != nil || len(got) == 0 || got[0].ID != fri.ID {
+			t.Errorf("vector similar = %v, %v", contents(got), err)
+		}
+		got, err = s.Similar(ctx, SimilarParams{Scope: scope, Content: fri.Content, Exclude: fri.ID})
+		if err != nil || len(got) != 0 {
+			t.Errorf("exclude failed: %v, %v", contents(got), err)
+		}
+		if _, err := s.Similar(ctx, SimilarParams{Scope: scope, Content: "x", Exclude: "bad"}); !errors.Is(err, ErrInvalidID) {
+			t.Errorf("bad exclude err = %v", err)
+		}
+		// Unrelated content yields nothing.
+		got, err = s.Similar(ctx, SimilarParams{Scope: scope, Content: "Kubernetes ingress TLS renewal"})
+		if err != nil || len(got) != 0 {
+			t.Errorf("unrelated similar = %v, %v", contents(got), err)
+		}
+	})
+
+	t.Run("recent episodes", func(t *testing.T) {
+		scope := "project:ex/episodes"
+		for _, c := range []string{"session one", "session two", "session three"} {
+			create(t, CreateParams{Type: memory.TypeEpisodic, Scope: scope, Content: c})
+		}
+		create(t, CreateParams{Type: memory.TypeProject, Scope: scope, Content: "not an episode"})
+		got, err := s.RecentEpisodes(ctx, scope, 2)
+		if err != nil || len(got) != 2 || got[0].Content != "session three" || got[1].Content != "session two" {
+			t.Errorf("recent = %v, %v", contentsM(got), err)
+		}
+	})
+
+	t.Run("for each and replace content", func(t *testing.T) {
+		m := create(t, CreateParams{Type: memory.TypeSemantic, Scope: "user", Content: "contains a secret value",
+			Embedding: bagOfWords("contains a secret value"), EmbeddingModel: "fake-v1"})
+		seen := 0
+		if err := s.ForEach(ctx, []memory.Status{memory.StatusActive}, func(x Memory) error {
+			if x.Status != memory.StatusActive {
+				t.Errorf("ForEach returned %s", x.Status)
+			}
+			seen++
+			return nil
+		}); err != nil || seen == 0 {
+			t.Fatalf("ForEach seen %d, %v", seen, err)
+		}
+		stop := errors.New("stop")
+		if err := s.ForEach(ctx, nil, func(Memory) error { return stop }); !errors.Is(err, stop) {
+			t.Errorf("ForEach did not propagate error: %v", err)
+		}
+		r, err := s.Rewrite(ctx, m.ID, "contains a [REDACTED:x] value", map[string]any{"next_steps": []string{"[REDACTED:x]"}}, "secret scan")
+		if err != nil || r.Content != "contains a [REDACTED:x] value" || r.EmbeddingModel != nil || r.Attrs["redact_reason"] != "secret scan" || r.Attrs["redacted_at"] == nil {
+			t.Errorf("rewrite = %+v, %v", r, err)
+		}
+		if steps, _ := r.Attrs["next_steps"].([]any); len(steps) != 1 || steps[0] != "[REDACTED:x]" {
+			t.Errorf("rewrite attrs = %v", r.Attrs)
+		}
+		if _, err := s.Rewrite(ctx, m.ID, "  ", nil, "x"); err == nil {
+			t.Error("empty replacement accepted")
+		}
+		if _, err := s.Rewrite(ctx, "11111111-1111-1111-1111-111111111111", "x", nil, "x"); !errors.Is(err, ErrNotFound) {
+			t.Errorf("rewrite missing err = %v", err)
+		}
+	})
+
+	t.Run("find session memory", func(t *testing.T) {
+		scope := "project:ex/sessions"
+		create(t, CreateParams{Type: memory.TypeEpisodic, Scope: scope, Content: "first summary", SourceAgent: "codex", SourceSession: "s-1"})
+		second := create(t, CreateParams{Type: memory.TypeEpisodic, Scope: scope, Content: "second summary", SourceAgent: "codex", SourceSession: "s-1"})
+		got, err := s.FindSessionMemory(ctx, scope, memory.TypeEpisodic, "codex", "s-1")
+		if err != nil || got.ID != second.ID {
+			t.Errorf("session memory = %v, %v", got.Content, err)
+		}
+		for _, c := range []struct{ agent, session string }{{"claude-code", "s-1"}, {"codex", "s-2"}} {
+			if _, err := s.FindSessionMemory(ctx, scope, memory.TypeEpisodic, c.agent, c.session); !errors.Is(err, ErrNotFound) {
+				t.Errorf("%s/%s matched: %v", c.agent, c.session, err)
+			}
 		}
 	})
 

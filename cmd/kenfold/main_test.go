@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"os"
@@ -79,7 +80,7 @@ func runCLI(t *testing.T, env map[string]string, args ...string) (stdout, stderr
 		}
 		return ""
 	}
-	err = run(context.Background(), args, getenv, &out, &errOut)
+	err = run(context.Background(), args, getenv, strings.NewReader(""), &out, &errOut)
 	return out.String(), errOut.String(), err
 }
 
@@ -163,6 +164,84 @@ func TestParseArgsInterspersed(t *testing.T) {
 	}
 	if _, err := parseArgs(flag.NewFlagSet("t", flag.ContinueOnError), []string{"--nope"}); !errors.Is(err, errUsage) {
 		t.Errorf("unknown flag err = %v", err)
+	}
+}
+
+func TestHookCLI(t *testing.T) {
+	// config: valid JSON, absolute binary path, quoted key file, per-client events.
+	keyDir := filepath.Join(t.TempDir(), "my keys")
+	for client, want := range map[string][]string{
+		"claude-code": {"SessionStart", "UserPromptSubmit", "Stop", "PostCompact", "SessionEnd"},
+		"codex":       {"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"},
+	} {
+		out, _, err := runCLI(t, nil, "hook", "config", client, "--key-file", filepath.Join(keyDir, "k"))
+		if err != nil {
+			t.Fatalf("%s: %v", client, err)
+		}
+		var cfg struct {
+			Hooks map[string][]struct {
+				Hooks []struct {
+					Type, Command string
+					Timeout       int
+				}
+			}
+		}
+		if err := json.Unmarshal([]byte(out), &cfg); err != nil {
+			t.Fatalf("%s: config is not JSON: %v\n%s", client, err, out)
+		}
+		if len(cfg.Hooks) != len(want) {
+			t.Errorf("%s: events = %v", client, cfg.Hooks)
+		}
+		for _, ev := range want {
+			h := cfg.Hooks[ev][0].Hooks[0]
+			if h.Type != "command" || !filepath.IsAbs(strings.Trim(strings.Fields(h.Command)[0], "'")) ||
+				!strings.Contains(h.Command, " hook --key-file '"+filepath.Join(keyDir, "k")+"'") || h.Timeout <= 0 {
+				t.Errorf("%s %s: %+v", client, ev, h)
+			}
+		}
+		if client == "codex" && cfg.Hooks["SessionEnd"][0].Hooks[0].Timeout > 3 {
+			t.Error("codex SessionEnd timeout exceeds its 3 s maximum")
+		}
+	}
+	if _, _, err := runCLI(t, nil, "hook", "config", "cursor"); !errors.Is(err, errUsage) {
+		t.Errorf("unknown client: %v", err)
+	}
+
+	// The hook fails open: bad input, unreachable server, missing key file all exit 0.
+	env := map[string]string{"KENFOLD_STATE_DIR": t.TempDir(), "KENFOLD_URL": "http://127.0.0.1:1/mcp"}
+	var out, errOut bytes.Buffer
+	if err := run(context.Background(), []string{"hook"}, func(k string) string { return env[k] }, strings.NewReader("garbage"), &out, &errOut); err != nil {
+		t.Errorf("bad input: %v", err)
+	}
+	if !strings.Contains(errOut.String(), "not JSON") {
+		t.Errorf("stderr = %q", errOut.String())
+	}
+	out.Reset()
+	start := `{"hook_event_name":"SessionStart","session_id":"s","cwd":"/"}`
+	if err := run(context.Background(), []string{"hook"}, func(k string) string { return env[k] }, strings.NewReader(start), &out, &errOut); err != nil {
+		t.Errorf("server down: %v", err)
+	}
+	if !strings.Contains(out.String(), "systemMessage") {
+		t.Errorf("server down output = %q", out.String())
+	}
+	if err := run(context.Background(), []string{"hook", "--key-file", "/nonexistent/key"}, func(k string) string { return env[k] }, strings.NewReader(start), &out, &errOut); err != nil {
+		t.Errorf("missing key file: %v", err)
+	}
+	if _, _, err := runCLI(t, nil, "hook", "positional"); !errors.Is(err, errUsage) {
+		t.Errorf("positional arg: %v", err)
+	}
+}
+
+func TestShellQuote(t *testing.T) {
+	for in, want := range map[string]string{
+		"/usr/local/bin/kenfold": "/usr/local/bin/kenfold",
+		"/Users/me/My Apps/kf":   "'/Users/me/My Apps/kf'",
+		"it's":                   `'it'\''s'`,
+		"":                       "''",
+	} {
+		if got := shellQuote(in); got != want {
+			t.Errorf("shellQuote(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

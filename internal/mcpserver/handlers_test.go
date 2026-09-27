@@ -166,6 +166,63 @@ func TestBudget(t *testing.T) {
 	}
 }
 
+func TestSecretsRejectedBeforeStorage(t *testing.T) {
+	h := newHandlers(Deps{}) // no store: rejection must happen before any storage call
+	ctx := context.Background()
+	secret := "ghp_" + strings.Repeat("aB3", 12) // assembled at runtime; GitHub token shape
+	cases := map[string]error{}
+	_, _, cases["remember"] = h.remember(ctx, nil, RememberInput{Content: "CI uses token " + secret})
+	_, _, cases["handoff summary"] = h.handoff(ctx, nil, HandoffInput{Summary: "set GITHUB_TOKEN=" + secret})
+	_, _, cases["handoff step"] = h.handoff(ctx, nil, HandoffInput{Summary: "ok", NextSteps: []string{"fine", "export API_KEY=" + secret}})
+	for name, err := range cases {
+		if err == nil {
+			t.Errorf("%s: secret accepted", name)
+			continue
+		}
+		msg := err.Error()
+		if strings.Contains(msg, secret) || strings.Contains(msg, secret[4:12]) {
+			t.Errorf("%s: error echoes the secret: %q", name, msg)
+		}
+		if !strings.Contains(msg, "GitHub token") || strings.Contains(msg, "internal error") {
+			t.Errorf("%s: message = %q", name, msg)
+		}
+	}
+	if err := cases["handoff step"]; err != nil && !strings.Contains(err.Error(), "next_steps[1]") {
+		t.Errorf("step index missing: %q", err)
+	}
+}
+
+func TestSessionOf(t *testing.T) {
+	mk := func(v any) *mcp.CallToolRequest {
+		return &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Meta: mcp.Meta{MetaSessionID: v}}}
+	}
+	for v, want := range map[any]string{
+		"abc-123":                "abc-123",
+		"  padded  ":             "padded",
+		"":                       "",
+		42:                       "",
+		"bad\nline":              "",
+		strings.Repeat("x", 129): "",
+		strings.Repeat("세", 128): strings.Repeat("세", 128),
+	} {
+		if got := sessionOf(mk(v)); got != want {
+			t.Errorf("sessionOf(%q) = %q, want %q", v, got, want)
+		}
+	}
+	if sessionOf(nil) != "" || sessionOf(&mcp.CallToolRequest{}) != "" {
+		t.Error("nil request/params")
+	}
+}
+
+func TestTruncateWithEllipsis(t *testing.T) {
+	if got := truncateWithEllipsis("hello world", 7); got != "hello…" {
+		t.Errorf("got %q", got)
+	}
+	if got := truncateWithEllipsis("short", 7); got != "short" {
+		t.Errorf("got %q", got)
+	}
+}
+
 func TestTruncateRunes(t *testing.T) {
 	if got := truncateRunes("한국어테스트", 3); got != "한국어" {
 		t.Errorf("got %q", got)

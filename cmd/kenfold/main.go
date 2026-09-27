@@ -41,6 +41,12 @@ Usage:
                                        soft-delete a memory
 
   kenfold reindex                      embed memories missing an embedding for the configured model
+  kenfold scan [--redact]              find (and remove) secrets stored before the secret filter
+
+  kenfold hook [--key-file F] [--no-capture]
+                                       lifecycle hook for Claude Code and Codex (reads the event on stdin)
+  kenfold hook config <claude-code|codex> [--key-file F]
+                                       print the hooks configuration for a client
   kenfold version
 
 Environment:
@@ -57,13 +63,18 @@ Environment:
   KENFOLD_EMBED_DIMENSIONS     send dimensions=1024 to the provider (default false)
   KENFOLD_SEARCH_MAX_DISTANCE  cosine distance cutoff for vector matches (default 0.55)
   KENFOLD_LOG_LEVEL            debug|info|warn|error      (default info)
+
+Hook environment:
+  KENFOLD_URL                  MCP endpoint               (default http://127.0.0.1:7077/mcp)
+  KENFOLD_API_KEY              the agent's API key, unless --key-file or --key-env is given
+  KENFOLD_STATE_DIR            local session logs and spool (default ~/.local/state/kenfold)
 `
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, os.Args[1:], os.Getenv, os.Stdout, os.Stderr); err != nil {
+	if err := run(ctx, os.Args[1:], os.Getenv, os.Stdin, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, "kenfold:", err)
 		if errors.Is(err, errUsage) {
 			os.Exit(2)
@@ -87,7 +98,7 @@ type cli struct {
 	errOut io.Writer // diagnostics (stderr)
 }
 
-func run(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) error {
+func run(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return usageErr("missing command")
@@ -101,6 +112,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	case "help", "--help", "-h":
 		fmt.Fprint(stdout, usage)
 		return nil
+	case "hook":
+		// Runs inside Claude Code / Codex: independent of server configuration.
+		return hookCmd(ctx, rest, getenv, stdin, stdout, stderr)
 	}
 
 	cfg, err := config.LoadFrom(getenv)
@@ -137,6 +151,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 			return usageErr("reindex takes no arguments")
 		}
 		return c.reindex(ctx)
+	case "scan":
+		return c.scan(ctx, rest)
 	default:
 		fmt.Fprint(stderr, usage)
 		return usageErr("unknown command %q", cmd)

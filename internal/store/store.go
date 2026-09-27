@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -75,16 +76,17 @@ type Scored struct {
 
 // CreateParams is the input for Create.
 type CreateParams struct {
-	Type        memory.Type
-	Scope       string
-	Content     string
-	Attrs       map[string]any
-	SourceAgent string
-	Trust       memory.Trust
-	Confidence  float64
-	Status      memory.Status
-	Supersedes  *string
-	ExpiresAt   *time.Time
+	Type          memory.Type
+	Scope         string
+	Content       string
+	Attrs         map[string]any
+	SourceAgent   string
+	SourceSession string // optional: the agent session that wrote the memory
+	Trust         memory.Trust
+	Confidence    float64
+	Status        memory.Status
+	Supersedes    *string
+	ExpiresAt     *time.Time
 	// Embedding is optional; when set, EmbeddingModel must name the model.
 	Embedding      []float32
 	EmbeddingModel string
@@ -130,11 +132,11 @@ func (s *Store) Create(ctx context.Context, p CreateParams) (Memory, error) {
 		}
 		return scan(tx.QueryRow(ctx, `
 			INSERT INTO memory
-			  (type, scope, content, attrs, source_agent, trust, confidence,
+			  (type, scope, content, attrs, source_agent, source_session, trust, confidence,
 			   status, supersedes, expires_at, embedding, embedding_model)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text::vector, $12)
+			VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, $8, $9, $10, $11, $12::text::vector, $13)
 			RETURNING `+columns,
-			p.Type, p.Scope, p.Content, attrs, p.SourceAgent, p.Trust, p.Confidence,
+			p.Type, p.Scope, p.Content, attrs, p.SourceAgent, p.SourceSession, p.Trust, p.Confidence,
 			p.Status, p.Supersedes, p.ExpiresAt, vec, model), &m)
 	})
 	if err != nil {
@@ -159,14 +161,26 @@ func lockActive(ctx context.Context, tx pgx.Tx, id string) error {
 	return nil
 }
 
-// FindDuplicate returns an active or proposed, unexpired memory with exactly
-// the same scope, type, and content, or ErrNotFound. It lets remember be
-// idempotent when agents store the same fact again.
+// ContentKey normalizes content the same way as the memory.content_key column
+// (migrations/00003): trimmed, whitespace runs collapsed to one space,
+// trailing '.', '!' or '。' removed, lowercased. Two memories with the same
+// key state the same thing.
+func ContentKey(content string) string {
+	s := strings.Join(strings.FieldsFunc(content, unicode.IsSpace), " ")
+	s = strings.TrimRight(s, ".!。")
+	return strings.ToLower(s)
+}
+
+// FindDuplicate returns an active or proposed, unexpired memory in the same
+// scope and type whose content differs from content only in case, whitespace,
+// or trailing punctuation (see content_key in migrations), or ErrNotFound. It
+// lets remember be idempotent when agents store the same fact again.
 func (s *Store) FindDuplicate(ctx context.Context, scope string, typ memory.Type, content string) (Memory, error) {
 	var m Memory
 	err := scan(s.pool.QueryRow(ctx, `
 		SELECT `+columns+` FROM memory
-		WHERE scope = $1 AND type = $2 AND content = $3
+		WHERE scope = $1 AND type = $2
+		  AND content_key = lower(regexp_replace(regexp_replace(btrim($3::text), '\s+', ' ', 'g'), '[.!。]+$', ''))
 		  AND status IN ('active', 'proposed')
 		  AND (expires_at IS NULL OR expires_at > now())
 		ORDER BY created_at DESC
@@ -251,11 +265,12 @@ func (s *Store) SoftDelete(ctx context.Context, id, reason, agent string) (Memor
 
 // HandoffParams is the input for CreateHandoff.
 type HandoffParams struct {
-	Scope       string
-	Summary     string
-	NextSteps   []string
-	SourceAgent string
-	ExpiresAt   time.Time
+	Scope         string
+	Summary       string
+	NextSteps     []string
+	SourceAgent   string
+	SourceSession string
+	ExpiresAt     time.Time
 }
 
 // CreateHandoff stores a handoff note as a temporary memory. There is at most
@@ -286,10 +301,10 @@ func (s *Store) CreateHandoff(ctx context.Context, p HandoffParams) (Memory, err
 			return err
 		}
 		return scan(tx.QueryRow(ctx, `
-			INSERT INTO memory (type, scope, content, attrs, source_agent, trust, status, supersedes, expires_at)
-			VALUES ('temporary', $1, $2, $3, $4, 'agent', 'active', $5, $6)
+			INSERT INTO memory (type, scope, content, attrs, source_agent, source_session, trust, status, supersedes, expires_at)
+			VALUES ('temporary', $1, $2, $3, $4, NULLIF($5, ''), 'agent', 'active', $6, $7)
 			RETURNING `+columns,
-			p.Scope, p.Summary, attrs, p.SourceAgent, prev, p.ExpiresAt), &m)
+			p.Scope, p.Summary, attrs, p.SourceAgent, p.SourceSession, prev, p.ExpiresAt), &m)
 	})
 	if err != nil {
 		return Memory{}, err
@@ -475,6 +490,172 @@ func (s *Store) Search(ctx context.Context, p SearchParams) ([]Scored, error) {
 		return nil, fmt.Errorf("search: %w", err)
 	}
 	return out, nil
+}
+
+// ---- similarity and review ----
+
+// SimilarParams controls Similar.
+type SimilarParams struct {
+	Scope   string
+	Content string
+	Exclude string    // memory id to leave out (e.g. the one just written)
+	Vector  []float32 // embedding of Content; optional
+	Model   string
+	// MaxDistance is the cosine distance cutoff (default 0.25: much tighter
+	// than search, because a hint claims "this may be the same fact").
+	MaxDistance float64
+	// MinTrigram is the pg_trgm similarity cutoff (default 0.5).
+	MinTrigram float64
+	Limit      int // default 3
+}
+
+// Similar returns active memories in the same scope whose content is close to
+// Content, by vector distance or trigram similarity. Callers present them as
+// "maybe the same fact, or one this contradicts"; nothing is merged. Score is
+// the larger of cosine similarity and trigram similarity.
+func (s *Store) Similar(ctx context.Context, p SimilarParams) ([]Scored, error) {
+	limit := clamp(p.Limit, 3, 10)
+	maxDist := p.MaxDistance
+	if maxDist <= 0 {
+		maxDist = 0.25
+	}
+	minTrgm := p.MinTrigram
+	if minTrgm <= 0 {
+		minTrgm = 0.5
+	}
+	vec, err := vectorParam(p.Vector)
+	if err != nil {
+		return nil, err
+	}
+	var exclude *string
+	if p.Exclude != "" {
+		if !ValidID(p.Exclude) {
+			return nil, ErrInvalidID
+		}
+		exclude = &p.Exclude
+	}
+	// $1 scope, $2 content, $3 exclude, $4 vector, $5 model, $6 max distance,
+	// $7 min trigram similarity, $8 limit.
+	rows, err := s.pool.Query(ctx, `
+		WITH cand AS (
+		    SELECT m.id, 1 - (m.embedding <=> $4::text::vector) AS sim
+		    FROM memory m
+		    WHERE $4::text IS NOT NULL AND m.embedding IS NOT NULL AND m.embedding_model = $5
+		      AND m.scope = $1 AND m.status = 'active'
+		      AND (m.expires_at IS NULL OR m.expires_at > now())
+		      AND ($3::uuid IS NULL OR m.id <> $3::uuid)
+		      AND m.embedding <=> $4::text::vector <= $6
+		    UNION ALL
+		    SELECT m.id, similarity(m.content, $2) AS sim
+		    FROM memory m
+		    WHERE m.scope = $1 AND m.status = 'active'
+		      AND (m.expires_at IS NULL OR m.expires_at > now())
+		      AND ($3::uuid IS NULL OR m.id <> $3::uuid)
+		      AND m.content % $2
+		      AND similarity(m.content, $2) >= $7
+		),
+		best AS (SELECT id, max(sim) AS sim FROM cand GROUP BY id)
+		SELECT `+mColumns+`, b.sim::float8
+		FROM best b JOIN memory m ON m.id = b.id
+		WHERE m.type <> 'temporary'
+		ORDER BY b.sim DESC, m.created_at DESC
+		LIMIT $8`,
+		p.Scope, p.Content, exclude, vec, p.Model, maxDist, minTrgm, limit)
+	if err != nil {
+		return nil, fmt.Errorf("similar: %w", err)
+	}
+	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Scored, error) {
+		var sc Scored
+		return sc, r.Scan(append(fields(&sc.Memory), &sc.Score)...)
+	})
+}
+
+// RecentEpisodes returns the newest active episodic memories (session
+// summaries) in scope, newest first.
+func (s *Store) RecentEpisodes(ctx context.Context, scope string, limit int) ([]Memory, error) {
+	return s.List(ctx, ListParams{Scopes: []string{scope}, Types: []memory.Type{memory.TypeEpisodic}, Limit: clamp(limit, 3, 20)})
+}
+
+// ForEach calls fn for every memory with one of statuses (all statuses when
+// empty), in id order. It stops at the first error fn returns.
+func (s *Store) ForEach(ctx context.Context, statuses []memory.Status, fn func(Memory) error) error {
+	var after *string
+	for {
+		rows, err := s.pool.Query(ctx, `
+			SELECT `+columns+` FROM memory
+			WHERE ($1::text[] IS NULL OR status = ANY($1))
+			  AND ($2::uuid IS NULL OR id > $2::uuid)
+			ORDER BY id LIMIT 500`, stringsOf(statuses), after)
+		if err != nil {
+			return err
+		}
+		batch, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (Memory, error) {
+			var m Memory
+			return m, scan(r, &m)
+		})
+		if err != nil {
+			return err
+		}
+		if len(batch) == 0 {
+			return nil
+		}
+		for _, m := range batch {
+			if err := fn(m); err != nil {
+				return err
+			}
+		}
+		after = &batch[len(batch)-1].ID
+	}
+}
+
+// Rewrite replaces a memory's content and attrs in place and clears its
+// embedding (so it is re-embedded from the new text). It exists for one
+// purpose: removing secrets that were stored before the secret filter. Normal
+// updates go through supersede, which keeps history. attrs replaces the whole
+// attrs object; redacted_at and redact_reason are added to it.
+func (s *Store) Rewrite(ctx context.Context, id, content string, attrs map[string]any, reason string) (Memory, error) {
+	if !ValidID(id) {
+		return Memory{}, ErrInvalidID
+	}
+	if strings.TrimSpace(content) == "" {
+		return Memory{}, errors.New("replacement content is empty")
+	}
+	if attrs == nil {
+		attrs = map[string]any{}
+	}
+	var m Memory
+	err := scan(s.pool.QueryRow(ctx, `
+		UPDATE memory
+		SET content = $2, embedding = NULL, embedding_model = NULL,
+		    attrs = $3::jsonb || jsonb_build_object('redacted_at', now(), 'redact_reason', $4::text)
+		WHERE id = $1
+		RETURNING `+columns, id, content, attrs, reason), &m)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Memory{}, ErrNotFound
+	}
+	if err != nil {
+		return Memory{}, err
+	}
+	return m, nil
+}
+
+// FindSessionMemory returns the newest active memory of typ in scope written by
+// agent in session, or ErrNotFound. Hooks use it so that a session's summary is
+// replaced, not duplicated, when a session ends more than once.
+func (s *Store) FindSessionMemory(ctx context.Context, scope string, typ memory.Type, agent, session string) (Memory, error) {
+	var m Memory
+	err := scan(s.pool.QueryRow(ctx, `
+		SELECT `+columns+` FROM memory
+		WHERE scope = $1 AND type = $2 AND source_agent = $3 AND source_session = $4
+		  AND status = 'active'
+		ORDER BY created_at DESC LIMIT 1`, scope, typ, agent, session), &m)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Memory{}, ErrNotFound
+	}
+	if err != nil {
+		return Memory{}, err
+	}
+	return m, nil
 }
 
 // ---- embeddings ----

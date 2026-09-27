@@ -25,10 +25,14 @@ func TestScope(t *testing.T) {
 			t.Errorf("Scope(%q) = %q, %v; want %q", in, got, err, want)
 		}
 	}
-	for _, bad := range []string{"https://", ".git", "/", strings.Repeat("a", maxProjectRunes+1), "a\nb", "\x00bad"} {
+	for _, bad := range []string{"https://", ".git", "/", strings.Repeat("a", maxProjectRunes+1), "a\nb", "\x00bad",
+		"/Users/me/dev/kenfold", "~/dev/kenfold", "./kenfold", "../kenfold", "file:///srv/git/repo.git", `C:\src\repo`, "c:/src/repo", `\\server\share\repo`} {
 		if got, err := Scope(bad); err == nil {
 			t.Errorf("Scope(%q) = %q; want error", bad, got)
 		}
+	}
+	if _, err := Scope("/Users/me/dev/kenfold"); err == nil || !strings.Contains(err.Error(), "git remote URL") {
+		t.Errorf("local path error should explain what to pass: %v", err)
 	}
 }
 

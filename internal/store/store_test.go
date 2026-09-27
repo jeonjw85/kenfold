@@ -43,6 +43,23 @@ func TestVectorParam(t *testing.T) {
 	}
 }
 
+func TestContentKey(t *testing.T) {
+	// Same cases as the content_key checks in migrations_test.go and the
+	// normalized-duplicate integration test.
+	for in, want := range map[string]string{
+		"  We  use\tPGX v5.  ": "we use pgx v5",
+		"We use pgx v5!!":      "we use pgx v5",
+		"배포는 금요일에 한다。":         "배포는 금요일에 한다",
+		"multi\nline\ttext.":   "multi line text",
+		"version 1.2.3":        "version 1.2.3",
+		"":                     "",
+	} {
+		if got := ContentKey(in); got != want {
+			t.Errorf("ContentKey(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestClamp(t *testing.T) {
 	for _, c := range []struct{ v, def, max, want int }{{0, 10, 50, 10}, {-5, 10, 50, 10}, {7, 10, 50, 7}, {500, 10, 50, 50}} {
 		if got := clamp(c.v, c.def, c.max); got != c.want {

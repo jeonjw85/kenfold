@@ -61,6 +61,7 @@ type GetContextInput struct {
 type GetContextOutput struct {
 	Preferences []MemoryView `json:"preferences,omitempty"`
 	Handoff     *MemoryView  `json:"handoff,omitempty" jsonschema:"most recent handoff for this project that no agent has resumed yet, if any"`
+	Recent      []MemoryView `json:"recent,omitempty" jsonschema:"summaries of the latest sessions in this project, newest first"`
 	Project     []MemoryView `json:"project,omitempty"`
 	Relevant    []MemoryView `json:"relevant,omitempty"`
 	Truncated   bool         `json:"truncated,omitempty" jsonschema:"true if memories were left out to fit the budget; use recall to find more"`
@@ -81,6 +82,7 @@ type RememberOutput struct {
 	Type         memory.Type   `json:"type"`
 	Status       memory.Status `json:"status" jsonschema:"'active', or 'proposed' if it awaits user review (new preferences)"`
 	Deduplicated bool          `json:"deduplicated,omitempty" jsonschema:"true if an identical memory already existed; its id is returned and nothing new was stored"`
+	Similar      []MemoryView  `json:"similar,omitempty" jsonschema:"existing memories that may state the same fact or contradict this one. If one is outdated, call remember again with supersedes set to its id, or forget it"`
 }
 
 // ---- recall ----
@@ -173,7 +175,7 @@ func New(version string, d Deps) *mcp.Server {
 	addTool(s, &mcp.Tool{
 		Name:        "remember",
 		Title:       "Remember",
-		Description: "Store a durable memory (decision, fact, convention, preference) shared with all of the user's agents. Use supersedes to replace an outdated memory instead of creating a contradiction. New preferences are held for the user's review before they are served.",
+		Description: "Store a durable memory (decision, fact, convention, preference) shared with all of the user's agents. Use supersedes to replace an outdated memory instead of creating a contradiction. New preferences are held for the user's review before they are served. Content containing credentials (API keys, tokens, passwords, private keys) is rejected.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: notDestructive, IdempotentHint: true, OpenWorldHint: closedWorld},
 	}, orStub(enabled, h.remember, "remember"))
 

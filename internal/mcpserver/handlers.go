@@ -7,12 +7,14 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kenfold/kenfold/internal/apikey"
 	"github.com/kenfold/kenfold/internal/memory"
+	"github.com/kenfold/kenfold/internal/secrets"
 	"github.com/kenfold/kenfold/internal/store"
 )
 
@@ -31,6 +33,12 @@ const (
 	maxBudget         = 32000
 	contextListLimit  = 50
 	contextRelevant   = 10
+	contextRecent     = 3
+	recentRunes       = 800
+	maxSessionIDRunes = 128
+	// MetaSessionID is the _meta key a client (e.g. `kenfold hook`) uses to
+	// tag writes with its agent session, recorded as memory.source_session.
+	MetaSessionID = "kenfold/session_id"
 	// embedTimeout bounds a single embedding call. On timeout or error the
 	// tool still succeeds using full-text search; writes are embedded later.
 	embedTimeout = 10 * time.Second
@@ -78,6 +86,10 @@ func (h *handlers) remember(ctx context.Context, req *mcp.CallToolRequest, in Re
 	if typ == memory.TypeTemporary && ttl == 0 {
 		return toolError[RememberOutput]("ttl_seconds is required for type=temporary")
 	}
+	if fs := secrets.Scan(content); len(fs) > 0 {
+		return h.rejectSecret(ctx, req, "remember", "content", fs)
+	}
+	agent, session := h.agentOf(req), sessionOf(req)
 
 	var supersedes *string
 	if in.Supersedes != "" {
@@ -98,6 +110,10 @@ func (h *handlers) remember(ctx context.Context, req *mcp.CallToolRequest, in Re
 		if old.Status != memory.StatusActive {
 			return toolError[RememberOutput](fmt.Sprintf("supersedes: memory %s is %s, not active; use recall to find the current version", id, old.Status))
 		}
+		if old.Type == typ && store.ContentKey(old.Content) == store.ContentKey(content) {
+			// Replacing a memory with the same statement changes nothing.
+			return nil, RememberOutput{ID: old.ID, Type: old.Type, Status: old.Status, Deduplicated: true}, nil
+		}
 		supersedes = &id
 	} else {
 		// Storing the same fact twice returns the existing memory.
@@ -108,17 +124,30 @@ func (h *handlers) remember(ctx context.Context, req *mcp.CallToolRequest, in Re
 		if !errors.Is(err, store.ErrNotFound) {
 			return nil, RememberOutput{}, h.internal(ctx, "remember", err)
 		}
+		// A session keeps one summary: a later summary from the same agent
+		// session replaces the earlier one (sessions can end more than once,
+		// e.g. after /clear or a resume).
+		if typ == memory.TypeEpisodic && session != "" {
+			prev, err := h.store.FindSessionMemory(ctx, scope, typ, agent, session)
+			switch {
+			case err == nil:
+				supersedes = &prev.ID
+			case !errors.Is(err, store.ErrNotFound):
+				return nil, RememberOutput{}, h.internal(ctx, "remember", err)
+			}
+		}
 	}
 
 	p := store.CreateParams{
-		Type:        typ,
-		Scope:       scope,
-		Content:     content,
-		SourceAgent: h.agentOf(req),
-		Trust:       memory.TrustAgent,
-		Confidence:  0.5,
-		Status:      statusFor(typ),
-		Supersedes:  supersedes,
+		Type:          typ,
+		Scope:         scope,
+		Content:       content,
+		SourceAgent:   agent,
+		SourceSession: session,
+		Trust:         memory.TrustAgent,
+		Confidence:    0.5,
+		Status:        statusFor(typ),
+		Supersedes:    supersedes,
 	}
 	if ttl > 0 {
 		exp := time.Now().Add(ttl)
@@ -132,11 +161,54 @@ func (h *handlers) remember(ctx context.Context, req *mcp.CallToolRequest, in Re
 	switch {
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrNotActive):
 		// The superseded memory changed between the check above and the insert.
-		return toolError[RememberOutput](fmt.Sprintf("supersedes: memory %s is no longer active; use recall to find the current version", in.Supersedes))
+		return toolError[RememberOutput](fmt.Sprintf("supersedes: memory %s is no longer active; use recall to find the current version", *supersedes))
 	case err != nil:
 		return nil, RememberOutput{}, h.internal(ctx, "remember", err)
 	}
-	return nil, RememberOutput{ID: m.ID, Type: m.Type, Status: m.Status}, nil
+	out := RememberOutput{ID: m.ID, Type: m.Type, Status: m.Status}
+	out.Similar = h.similar(ctx, m, p.Embedding, p.EmbeddingModel)
+	return nil, out, nil
+}
+
+// similar finds existing memories close to m, so the agent can supersede or
+// forget one it contradicts. It is best-effort: failures are logged and yield
+// no hints. Session summaries and temporary notes are not checked; they are
+// expected to resemble each other.
+func (h *handlers) similar(ctx context.Context, m store.Memory, vec []float32, model string) []MemoryView {
+	if m.Type == memory.TypeEpisodic || m.Type == memory.TypeTemporary {
+		return nil
+	}
+	res, err := h.store.Similar(ctx, store.SimilarParams{
+		Scope: m.Scope, Content: m.Content, Exclude: m.ID, Vector: vec, Model: model,
+	})
+	if err != nil {
+		h.log.WarnContext(ctx, "similar memories lookup failed", "err", err)
+		return nil
+	}
+	var out []MemoryView
+	for _, r := range res {
+		v := toMemoryView(r.Memory)
+		v.Score = r.Score
+		out = append(out, v)
+	}
+	return out
+}
+
+// rejectSecret refuses a write that contains credentials. The message names
+// the kind of secret but never echoes the value; the log records rule ids only.
+func (h *handlers) rejectSecret(ctx context.Context, req *mcp.CallToolRequest, tool, field string, fs []secrets.Finding) (*mcp.CallToolResult, RememberOutput, error) {
+	rules := make([]string, len(fs))
+	for i, f := range fs {
+		rules[i] = f.Rule
+	}
+	h.log.WarnContext(ctx, "rejected write containing a secret", "tool", tool, "agent", h.agentOf(req), "rules", rules)
+	return toolError[RememberOutput](secretMessage(field, fs))
+}
+
+func secretMessage(field string, fs []secrets.Finding) string {
+	return fmt.Sprintf("%s appears to contain a %s. Credentials must never be stored in shared memory: remove the value "+
+		"(you can say where it is kept, for example the name of the environment variable or secret manager entry) and try again",
+		field, strings.Join(secrets.Labels(fs), ", "))
 }
 
 // ---- forget ----
@@ -146,7 +218,9 @@ func (h *handlers) forget(ctx context.Context, req *mcp.CallToolRequest, in Forg
 	if !store.ValidID(id) {
 		return toolError[ForgetOutput](fmt.Sprintf("%q is not a memory id (use an id returned by remember, recall, or get_context)", in.ID))
 	}
-	reason := truncateRunes(strings.TrimSpace(in.Reason), maxReasonRunes)
+	// forget must always succeed, so a secret in the reason is redacted rather
+	// than rejected.
+	reason, _ := secrets.Redact(truncateRunes(strings.TrimSpace(in.Reason), maxReasonRunes))
 	m, err := h.store.SoftDelete(ctx, id, reason, h.agentOf(req))
 	if errors.Is(err, store.ErrNotFound) {
 		return toolError[ForgetOutput](fmt.Sprintf("memory %s not found", id))
@@ -164,6 +238,8 @@ func (h *handlers) recall(ctx context.Context, _ *mcp.CallToolRequest, in Recall
 	if query == "" {
 		return toolError[RecallOutput]("query must not be empty")
 	}
+	// Queries are not stored, but they are sent to the embedding provider.
+	query, _ = secrets.Redact(query)
 	scope, err := scopeFor(in.Project)
 	if err != nil {
 		return toolError[RecallOutput](err.Error())
@@ -211,13 +287,24 @@ func (h *handlers) handoff(ctx context.Context, req *mcp.CallToolRequest, in Han
 	if err != nil {
 		return toolError[HandoffOutput](err.Error())
 	}
+	if fs := secrets.Scan(summary); len(fs) > 0 {
+		_, _, err := h.rejectSecret(ctx, req, "handoff", "summary", fs)
+		return nil, HandoffOutput{}, err
+	}
+	for i, s := range steps {
+		if fs := secrets.Scan(s); len(fs) > 0 {
+			_, _, err := h.rejectSecret(ctx, req, "handoff", fmt.Sprintf("next_steps[%d]", i), fs)
+			return nil, HandoffOutput{}, err
+		}
+	}
 
 	m, err := h.store.CreateHandoff(ctx, store.HandoffParams{
-		Scope:       scope,
-		Summary:     summary,
-		NextSteps:   steps,
-		SourceAgent: h.agentOf(req),
-		ExpiresAt:   time.Now().Add(ttl),
+		Scope:         scope,
+		Summary:       summary,
+		NextSteps:     steps,
+		SourceAgent:   h.agentOf(req),
+		SourceSession: sessionOf(req),
+		ExpiresAt:     time.Now().Add(ttl),
 	})
 	if err != nil {
 		return nil, HandoffOutput{}, h.internal(ctx, "handoff", err)
@@ -253,8 +340,9 @@ func (h *handlers) resume(ctx context.Context, req *mcp.CallToolRequest, in Resu
 // ---- get_context ----
 
 // getContext assembles, in priority order and within an approximate token
-// budget: preferences, the pending (not yet resumed) handoff, project
-// knowledge, and memories relevant to the task. A memory appears at most once.
+// budget: preferences, the pending (not yet resumed) handoff, recent session
+// summaries, project knowledge, and memories relevant to the task. A memory
+// appears at most once.
 func (h *handlers) getContext(ctx context.Context, _ *mcp.CallToolRequest, in GetContextInput) (*mcp.CallToolResult, GetContextOutput, error) {
 	scope, err := scopeFor(in.Project)
 	if err != nil {
@@ -292,6 +380,19 @@ func (h *handlers) getContext(ctx context.Context, _ *mcp.CallToolRequest, in Ge
 		return nil, GetContextOutput{}, h.internal(ctx, "get_context", err)
 	}
 
+	// What happened in the latest sessions here (summaries written by hooks).
+	recent, err := h.store.RecentEpisodes(ctx, scope, contextRecent)
+	if err != nil {
+		return nil, GetContextOutput{}, h.internal(ctx, "get_context", err)
+	}
+	for _, m := range recent {
+		v := toMemoryView(m)
+		v.Content = truncateWithEllipsis(v.Content, recentRunes)
+		if v, ok := b.take(v); ok {
+			out.Recent = append(out.Recent, v)
+		}
+	}
+
 	if scope != "user" {
 		proj, err := h.store.List(ctx, store.ListParams{Scopes: []string{scope}, Types: []memory.Type{memory.TypeProject}, Limit: contextListLimit})
 		if err != nil {
@@ -305,6 +406,7 @@ func (h *handlers) getContext(ctx context.Context, _ *mcp.CallToolRequest, in Ge
 	}
 
 	if task := truncateRunes(strings.TrimSpace(in.Task), maxQueryRunes); task != "" {
+		task, _ = secrets.Redact(task)
 		res, err := h.search(ctx, "get_context", task, scope, nil, contextRelevant)
 		if err != nil {
 			return nil, GetContextOutput{}, h.internal(ctx, "get_context", err)
@@ -403,6 +505,27 @@ func (h *handlers) agentOf(req *mcp.CallToolRequest) string {
 		}
 	}
 	return memory.UnknownAgent
+}
+
+// sessionOf returns the client's agent session id from _meta (see
+// MetaSessionID), or "" if absent or malformed.
+func sessionOf(req *mcp.CallToolRequest) string {
+	if req == nil || req.Params == nil {
+		return ""
+	}
+	s, _ := req.Params.Meta[MetaSessionID].(string)
+	s = strings.TrimSpace(s)
+	if s == "" || utf8.RuneCountInString(s) > maxSessionIDRunes || strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return ""
+	}
+	return s
+}
+
+func truncateWithEllipsis(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return strings.TrimRightFunc(truncateRunes(s, n-1), unicode.IsSpace) + "…"
 }
 
 // internal logs err and returns a generic tool error, so database details are
