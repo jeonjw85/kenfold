@@ -4,21 +4,34 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/kenfold/kenfold/internal/memory"
 )
 
 // Defaults target a local setup where Postgres runs from compose.yaml.
 const (
 	DefaultHTTPAddr    = "127.0.0.1:7077"
 	DefaultDatabaseURL = "postgres://kenfold:kenfold@127.0.0.1:54329/kenfold?sslmode=disable"
+	DefaultEmbedModel  = "bge-m3"
+	// DefaultSearchMaxDistance is the cosine distance cutoff for vector matches.
+	DefaultSearchMaxDistance = 0.55
+)
+
+// Auth modes for the HTTP server.
+const (
+	// AuthAPIKey requires "Authorization: Bearer kf_..." on /mcp (default).
+	AuthAPIKey = "apikey"
+	// AuthNone disables authentication. Only for loopback-only development.
+	AuthNone = "none"
 )
 
 type Config struct {
 	// HTTPAddr is the listen address for `kenfold serve`.
-	// Phase 0 has no authentication, so keep it on loopback.
 	HTTPAddr string
 	// DatabaseURL is a PostgreSQL connection string (pgvector required).
 	DatabaseURL string
@@ -28,7 +41,29 @@ type Config struct {
 	// Ports are ignored. Set to your public hostname when deploying remotely.
 	AllowedHosts []string
 	LogLevel     slog.Level
+
+	// Auth is AuthAPIKey or AuthNone.
+	Auth string
+	// Agent is the agent name recorded for `kenfold mcp` (stdio) sessions. When
+	// empty, the MCP client's self-reported name is used.
+	Agent string
+
+	// Embed configures the embedding provider; disabled when Embed.URL is empty.
+	Embed Embed
+	// SearchMaxDistance is the cosine distance cutoff for vector matches, in (0, 2].
+	SearchMaxDistance float64
 }
+
+// Embed configures an OpenAI-compatible embeddings endpoint.
+type Embed struct {
+	URL            string // e.g. http://127.0.0.1:11434/v1 for Ollama
+	Model          string
+	APIKey         string // never logged
+	SendDimensions bool   // send the "dimensions" parameter (for models not natively 1024-d)
+}
+
+// Enabled reports whether embeddings are configured.
+func (e Embed) Enabled() bool { return e.URL != "" }
 
 // DefaultAllowedHosts accepts loopback names only.
 var DefaultAllowedHosts = []string{"localhost", "127.0.0.1", "::1"}
@@ -39,9 +74,17 @@ func Load() (Config, error) { return LoadFrom(os.Getenv) }
 // LoadFrom reads configuration using getenv, which makes it testable.
 func LoadFrom(getenv func(string) string) (Config, error) {
 	c := Config{
-		HTTPAddr:     envOr(getenv, "KENFOLD_HTTP_ADDR", DefaultHTTPAddr),
-		DatabaseURL:  envOr(getenv, "KENFOLD_DATABASE_URL", DefaultDatabaseURL),
-		AllowedHosts: slices.Clone(DefaultAllowedHosts),
+		HTTPAddr:          envOr(getenv, "KENFOLD_HTTP_ADDR", DefaultHTTPAddr),
+		DatabaseURL:       envOr(getenv, "KENFOLD_DATABASE_URL", DefaultDatabaseURL),
+		AllowedHosts:      slices.Clone(DefaultAllowedHosts),
+		Auth:              strings.ToLower(envOr(getenv, "KENFOLD_AUTH", AuthAPIKey)),
+		Agent:             strings.TrimSpace(getenv("KENFOLD_AGENT")),
+		SearchMaxDistance: DefaultSearchMaxDistance,
+		Embed: Embed{
+			URL:    strings.TrimSpace(getenv("KENFOLD_EMBED_URL")),
+			Model:  envOr(getenv, "KENFOLD_EMBED_MODEL", DefaultEmbedModel),
+			APIKey: getenv("KENFOLD_EMBED_API_KEY"),
+		},
 	}
 
 	if v := getenv("KENFOLD_ALLOWED_HOSTS"); v != "" {
@@ -56,12 +99,12 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 		}
 	}
 
-	if v := getenv("KENFOLD_AUTO_MIGRATE"); v != "" {
-		b, err := strconv.ParseBool(v)
-		if err != nil {
-			return Config{}, fmt.Errorf("KENFOLD_AUTO_MIGRATE: %w", err)
-		}
-		c.AutoMigrate = b
+	var err error
+	if c.AutoMigrate, err = boolEnv(getenv, "KENFOLD_AUTO_MIGRATE"); err != nil {
+		return Config{}, err
+	}
+	if c.Embed.SendDimensions, err = boolEnv(getenv, "KENFOLD_EMBED_DIMENSIONS"); err != nil {
+		return Config{}, err
 	}
 
 	if v := getenv("KENFOLD_LOG_LEVEL"); v != "" {
@@ -69,12 +112,49 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("KENFOLD_LOG_LEVEL: %w", err)
 		}
 	}
+
+	switch c.Auth {
+	case AuthAPIKey, AuthNone:
+	default:
+		return Config{}, fmt.Errorf("KENFOLD_AUTH: %q is not one of %s, %s", c.Auth, AuthAPIKey, AuthNone)
+	}
+
+	if c.Agent != "" && !memory.ValidAgent(c.Agent) {
+		return Config{}, fmt.Errorf("KENFOLD_AGENT: %q is not a valid agent name (lowercase letters, digits, '.', '_', '-'; e.g. claude-code)", c.Agent)
+	}
+
+	if c.Embed.URL != "" {
+		u, err := url.Parse(c.Embed.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return Config{}, fmt.Errorf("KENFOLD_EMBED_URL: %q is not an http(s) URL", c.Embed.URL)
+		}
+	}
+
+	if v := getenv("KENFOLD_SEARCH_MAX_DISTANCE"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || !(f > 0 && f <= 2) {
+			return Config{}, fmt.Errorf("KENFOLD_SEARCH_MAX_DISTANCE: %q must be a number in (0, 2]", v)
+		}
+		c.SearchMaxDistance = f
+	}
 	return c, nil
 }
 
 func envOr(getenv func(string) string, key, def string) string {
-	if v := getenv(key); v != "" {
+	if v := strings.TrimSpace(getenv(key)); v != "" {
 		return v
 	}
 	return def
+}
+
+func boolEnv(getenv func(string) string, key string) (bool, error) {
+	v := strings.TrimSpace(getenv(key))
+	if v == "" {
+		return false, nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("%s: %w", key, err)
+	}
+	return b, nil
 }

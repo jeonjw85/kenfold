@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -21,14 +22,22 @@ type Pinger interface {
 	Ping(ctx context.Context) error
 }
 
-// New returns the root handler. allowedHosts is the Host header allowlist for
-// /mcp; an empty list rejects every MCP request.
-//
-// SECURITY: Phase 0 has no authentication. Only bind to loopback; auth
-// (API keys, then OAuth 2.1 for remote clients such as ChatGPT) lands in later phases.
-func New(mcpServer *mcp.Server, db Pinger, logger *slog.Logger, allowedHosts []string) http.Handler {
+// Options configures the HTTP surface.
+type Options struct {
+	// AllowedHosts is the Host header allowlist for /mcp; empty rejects every
+	// MCP request.
+	AllowedHosts []string
+	// Verifier authenticates bearer tokens on /mcp. Nil disables authentication,
+	// which is only acceptable on a loopback-only development setup.
+	Verifier auth.TokenVerifier
+}
+
+// New returns the root handler.
+func New(mcpServer *mcp.Server, db Pinger, logger *slog.Logger, opts Options) http.Handler {
 	mux := http.NewServeMux()
 
+	// Health probes are unauthenticated and ignore the Host allowlist so that
+	// orchestrators can reach them; they expose no data.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeStatus(w, http.StatusOK, "ok")
 	})
@@ -47,7 +56,7 @@ func New(mcpServer *mcp.Server, db Pinger, logger *slog.Logger, allowedHosts []s
 	// Stateless: every POST is self-contained, so any replica can serve any
 	// request. This is required for the 2026-07-28 protocol revision; older
 	// clients still work because each request gets a default session.
-	mcpHandler := mcp.NewStreamableHTTPHandler(
+	var mcpHandler http.Handler = mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return mcpServer },
 		&mcp.StreamableHTTPOptions{
 			Stateless:                    true,
@@ -55,12 +64,20 @@ func New(mcpServer *mcp.Server, db Pinger, logger *slog.Logger, allowedHosts []s
 			PropagateRequestCancellation: true,
 		},
 	)
-	// Layered browser-attack defenses for a server on the user's machine:
+	if opts.Verifier != nil {
+		// API keys do not expire (they are revoked), hence AllowMissingExpiration.
+		// The verified TokenInfo reaches tool handlers as req.Extra.TokenInfo.
+		mcpHandler = auth.RequireBearerToken(opts.Verifier, &auth.RequireBearerTokenOptions{
+			AllowMissingExpiration: true,
+		})(mcpHandler)
+	}
+	// Layered defenses, outermost first:
 	//   - Host allowlist: blocks DNS rebinding. The SDK's built-in check only
 	//     covers connections arriving on a loopback address, which is not the
 	//     case behind Docker port publishing, so we enforce it ourselves.
 	//   - Cross-origin protection: blocks CSRF-style cross-site POSTs.
-	mux.Handle(MCPPath, requireHost(allowedHosts, http.NewCrossOriginProtection().Handler(mcpHandler)))
+	//   - Bearer token (when enabled): identifies the calling agent.
+	mux.Handle(MCPPath, requireHost(opts.AllowedHosts, http.NewCrossOriginProtection().Handler(mcpHandler)))
 
 	return mux
 }

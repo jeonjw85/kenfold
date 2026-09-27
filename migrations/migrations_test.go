@@ -3,7 +3,9 @@ package migrations
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -30,8 +32,14 @@ func TestMigrationsIntegration(t *testing.T) {
 	if _, err := p.DownTo(ctx, 0); err != nil {
 		t.Fatalf("reset: %v", err)
 	}
+	if err := CheckCurrent(ctx, url); !errors.Is(err, ErrPending) {
+		t.Errorf("CheckCurrent on empty schema = %v, want ErrPending", err)
+	}
 	if _, err := p.Up(ctx); err != nil {
 		t.Fatalf("up: %v", err)
+	}
+	if err := CheckCurrent(ctx, url); err != nil {
+		t.Errorf("CheckCurrent after up = %v", err)
 	}
 
 	db, err := sql.Open("pgx", url)
@@ -91,12 +99,34 @@ func TestMigrationsIntegration(t *testing.T) {
 		t.Errorf("updated_at not bumped: %v, %v", touched, err)
 	}
 
+	// 00002: embedding provenance column exists and is nullable.
+	if err := exec(`UPDATE memory SET embedding_model = 'bge-m3' WHERE id = $1`, id); err != nil {
+		t.Errorf("set embedding_model: %v", err)
+	}
+
+	// 00002: api_key accepts a valid key and rejects invalid ones.
+	validHash := `'\x` + strings.Repeat("ab", 32) + `'::bytea`
+	if err := exec(`INSERT INTO api_key (agent, prefix, key_hash) VALUES ('claude-code', 'kf_abcd', ` + validHash + `)`); err != nil {
+		t.Fatalf("insert api_key: %v", err)
+	}
+	for name, q := range map[string]string{
+		"duplicate hash":    `INSERT INTO api_key (agent, prefix, key_hash) VALUES ('codex', 'kf_x', ` + validHash + `)`,
+		"short hash":        `INSERT INTO api_key (agent, prefix, key_hash) VALUES ('codex', 'kf_x', '\x0102'::bytea)`,
+		"uppercase agent":   `INSERT INTO api_key (agent, prefix, key_hash) VALUES ('Codex', 'kf_x', '\x` + strings.Repeat("cd", 32) + `'::bytea)`,
+		"agent with spaces": `INSERT INTO api_key (agent, prefix, key_hash) VALUES ('my agent', 'kf_x', '\x` + strings.Repeat("ef", 32) + `'::bytea)`,
+		"empty prefix":      `INSERT INTO api_key (agent, prefix, key_hash) VALUES ('codex', '', '\x` + strings.Repeat("01", 32) + `'::bytea)`,
+	} {
+		if err := exec(q); err == nil {
+			t.Errorf("api_key %s: insert succeeded; want constraint violation", name)
+		}
+	}
+
 	// Down must fully revert.
 	if _, err := p.DownTo(ctx, 0); err != nil {
 		t.Fatalf("down: %v", err)
 	}
 	var tables int
-	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pg_tables WHERE tablename IN ('memory', 'memory_edge')`).Scan(&tables); err != nil || tables != 0 {
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pg_tables WHERE tablename IN ('memory', 'memory_edge', 'api_key')`).Scan(&tables); err != nil || tables != 0 {
 		t.Errorf("tables after down = %d, %v; want 0", tables, err)
 	}
 	// Leave the schema migrated for manual inspection.

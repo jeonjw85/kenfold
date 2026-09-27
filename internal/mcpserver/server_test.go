@@ -13,7 +13,7 @@ func connect(t *testing.T) *mcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 	serverT, clientT := mcp.NewInMemoryTransports()
-	ss, err := New("test", nil).Connect(ctx, serverT, nil)
+	ss, err := New("test", Deps{}).Connect(ctx, serverT, nil)
 	if err != nil {
 		t.Fatalf("server connect: %v", err)
 	}
@@ -59,9 +59,15 @@ func TestToolsList(t *testing.T) {
 		t.Fatalf("tools = %v, want %v", names, want)
 	}
 
-	for _, n := range []string{"get_context", "recall", "resume"} {
+	for _, n := range []string{"get_context", "recall"} {
 		if a := byName[n].Annotations; a == nil || !a.ReadOnlyHint {
 			t.Errorf("%s should be read-only", n)
+		}
+	}
+	// resume records who resumed the handoff, so it is a (non-destructive) write.
+	for _, n := range []string{"remember", "handoff", "resume"} {
+		if a := byName[n].Annotations; a == nil || a.ReadOnlyHint || a.DestructiveHint == nil || *a.DestructiveHint {
+			t.Errorf("%s should be a non-destructive write", n)
 		}
 	}
 	if a := byName["forget"].Annotations; a == nil || a.DestructiveHint == nil || !*a.DestructiveHint {
@@ -80,7 +86,7 @@ func TestToolsList(t *testing.T) {
 	}
 }
 
-func TestStubReturnsToolError(t *testing.T) {
+func TestContractOnlyServerReturnsToolError(t *testing.T) {
 	cs := connect(t)
 	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "remember",
@@ -90,10 +96,9 @@ func TestStubReturnsToolError(t *testing.T) {
 		t.Fatalf("protocol error: %v", err)
 	}
 	if !res.IsError {
-		t.Fatal("expected IsError result from stub")
+		t.Fatal("expected IsError result without a store")
 	}
-	text := res.Content[0].(*mcp.TextContent).Text
-	if !strings.Contains(text, "not implemented") {
+	if text := res.Content[0].(*mcp.TextContent).Text; !strings.Contains(text, "without a store") {
 		t.Errorf("error text = %q", text)
 	}
 }
@@ -110,8 +115,8 @@ func TestInvalidInputRejected(t *testing.T) {
 			t.Errorf("%s: call succeeded; want validation failure", name)
 			continue
 		}
-		// Validation must fail before reaching the stub handler.
-		if err == nil && strings.Contains(res.Content[0].(*mcp.TextContent).Text, "not implemented") {
+		// Validation must fail before reaching the handler.
+		if err == nil && strings.Contains(res.Content[0].(*mcp.TextContent).Text, "without a store") {
 			t.Errorf("%s: reached handler; want schema validation failure", name)
 		}
 	}

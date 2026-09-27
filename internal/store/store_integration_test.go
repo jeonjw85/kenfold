@@ -2,9 +2,14 @@ package store
 
 import (
 	"context"
+	"errors"
+	"hash/fnv"
+	"math"
 	"os"
+	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -12,341 +17,507 @@ import (
 	"github.com/kenfold/kenfold/migrations"
 )
 
+// fakeEmbedder is a deterministic bag-of-words embedder: texts that share words
+// have high cosine similarity. It exercises the vector path without a model.
+type fakeEmbedder struct{ model string }
+
+func (f fakeEmbedder) Model() string { return f.model }
+
+func (f fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i, t := range texts {
+		out[i] = bagOfWords(t)
+	}
+	return out, nil
+}
+
+// pickyEmbedder fails any request that contains the text reject.
+type pickyEmbedder struct {
+	fakeEmbedder
+	reject string
+}
+
+func (p pickyEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	for _, t := range texts {
+		if t == p.reject {
+			return nil, errors.New("provider rejected input")
+		}
+	}
+	return p.fakeEmbedder.Embed(ctx, texts)
+}
+
+// downEmbedder always fails, like an unreachable provider.
+type downEmbedder struct{ model string }
+
+func (d downEmbedder) Model() string { return d.model }
+func (d downEmbedder) Embed(context.Context, []string) ([][]float32, error) {
+	return nil, errors.New("connection refused")
+}
+
+func bagOfWords(text string) []float32 {
+	v := make([]float32, EmbeddingDim)
+	for _, w := range strings.FieldsFunc(strings.ToLower(text), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
+		h := fnv.New32a()
+		h.Write([]byte(w))
+		v[h.Sum32()%EmbeddingDim]++
+	}
+	var n float64
+	for _, x := range v {
+		n += float64(x * x)
+	}
+	if n == 0 {
+		v[0] = 1
+		return v
+	}
+	for i := range v {
+		v[i] = float32(float64(v[i]) / math.Sqrt(n))
+	}
+	return v
+}
+
 // TestStoreIntegration exercises the store against a real PostgreSQL+pgvector
-// database. It is opt-in because it writes to the schema:
+// database. It is opt-in and TRUNCATES the memory table, so point it only at a
+// throwaway database:
 //
 //	KENFOLD_TEST_DATABASE_URL=postgres://... go test -run Integration ./internal/store/
-//
-// `make test-integration` points it at a throwaway database in compose Postgres.
 func TestStoreIntegration(t *testing.T) {
 	url := os.Getenv("KENFOLD_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("KENFOLD_TEST_DATABASE_URL not set")
 	}
 	ctx := context.Background()
-
-	// Ensure the schema exists (idempotent).
 	if _, err := migrations.Up(ctx, url); err != nil {
 		t.Fatalf("migrate up: %v", err)
 	}
-
 	pool, err := pgxpool.New(ctx, url)
 	if err != nil {
-		t.Fatalf("pool: %v", err)
+		t.Fatal(err)
 	}
 	defer pool.Close()
-
-	// Isolate this run's rows so the test is repeatable without a reset.
-	agent := "store-test-" + time.Now().Format("150405.000")
-	t.Cleanup(func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM memory WHERE source_agent = $1`, agent)
-	})
+	if _, err := pool.Exec(ctx, `TRUNCATE memory CASCADE`); err != nil {
+		t.Fatal(err)
+	}
 
 	s := New(pool)
-
-	t.Run("create defaults", func(t *testing.T) {
-		m, err := s.Create(ctx, CreateParams{
-			Type:        memory.TypeSemantic,
-			Scope:       "user",
-			Content:     "Go generics landed in 1.18",
-			SourceAgent: agent,
-			Trust:       memory.TrustAgent,
-			Confidence:  0.5,
-			Status:      memory.StatusActive,
-		})
+	const agent = "store-test"
+	create := func(t *testing.T, p CreateParams) Memory {
+		t.Helper()
+		if p.SourceAgent == "" {
+			p.SourceAgent = agent
+		}
+		if p.Trust == "" {
+			p.Trust = memory.TrustAgent
+		}
+		if p.Status == "" {
+			p.Status = memory.StatusActive
+		}
+		if p.Confidence == 0 {
+			p.Confidence = 0.5
+		}
+		m, err := s.Create(ctx, p)
 		if err != nil {
-			t.Fatalf("create: %v", err)
+			t.Fatalf("create %q: %v", p.Content, err)
 		}
-		if m.ID == "" {
-			t.Error("id not returned")
+		return m
+	}
+	status := func(t *testing.T, id string) memory.Status {
+		t.Helper()
+		m, err := s.Get(ctx, id)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if m.Status != memory.StatusActive {
-			t.Errorf("status = %q, want active", m.Status)
-		}
-		if m.CreatedAt.IsZero() || m.Attrs == nil {
-			t.Errorf("created_at/attrs not populated: %+v", m)
-		}
+		return m.Status
+	}
 
+	t.Run("create and get", func(t *testing.T) {
+		m := create(t, CreateParams{Type: memory.TypeSemantic, Scope: "user", Content: "Go generics landed in 1.18"})
+		if !ValidID(m.ID) || m.Status != memory.StatusActive || m.CreatedAt.IsZero() || m.Attrs == nil || m.EmbeddingModel != nil {
+			t.Errorf("unexpected row: %+v", m)
+		}
 		got, err := s.Get(ctx, m.ID)
-		if err != nil {
-			t.Fatalf("get: %v", err)
-		}
-		if got.Content != m.Content {
-			t.Errorf("round-trip content = %q", got.Content)
+		if err != nil || got.Content != m.Content {
+			t.Errorf("get = %+v, %v", got, err)
 		}
 	})
 
-	t.Run("temporary with ttl", func(t *testing.T) {
-		exp := time.Now().Add(time.Hour)
-		m, err := s.Create(ctx, CreateParams{
-			Type:        memory.TypeTemporary,
-			Scope:       "user",
-			Content:     "WIP: refactoring the store layer",
-			SourceAgent: agent,
-			Trust:       memory.TrustAgent,
-			Confidence:  0.5,
-			Status:      memory.StatusActive,
-			ExpiresAt:   &exp,
-		})
-		if err != nil {
-			t.Fatalf("create temporary: %v", err)
+	t.Run("invalid and unknown ids", func(t *testing.T) {
+		for _, id := range []string{"", "abc", "not-a-uuid-at-all-but-36-characters", "0199aaaa-bbbb-cccc-dddd-eeeeffff000g"} {
+			if _, err := s.Get(ctx, id); !errors.Is(err, ErrInvalidID) {
+				t.Errorf("Get(%q) err = %v, want ErrInvalidID", id, err)
+			}
+			if _, err := s.SoftDelete(ctx, id, "", agent); !errors.Is(err, ErrInvalidID) {
+				t.Errorf("SoftDelete(%q) err = %v, want ErrInvalidID", id, err)
+			}
 		}
+		missing := "11111111-1111-1111-1111-111111111111"
+		if _, err := s.Get(ctx, missing); !errors.Is(err, ErrNotFound) {
+			t.Errorf("get err = %v, want ErrNotFound", err)
+		}
+		if _, err := s.SoftDelete(ctx, missing, "", agent); !errors.Is(err, ErrNotFound) {
+			t.Errorf("delete err = %v, want ErrNotFound", err)
+		}
+		if _, err := s.Approve(ctx, missing); !errors.Is(err, ErrNotFound) {
+			t.Errorf("approve err = %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("temporary requires ttl", func(t *testing.T) {
+		exp := time.Now().Add(time.Hour)
+		m := create(t, CreateParams{Type: memory.TypeTemporary, Scope: "user", Content: "WIP note", ExpiresAt: &exp})
 		if m.ExpiresAt == nil {
 			t.Error("expires_at not persisted")
 		}
-	})
-
-	t.Run("temporary without ttl is rejected by the db", func(t *testing.T) {
-		_, err := s.Create(ctx, CreateParams{
-			Type:        memory.TypeTemporary,
-			Scope:       "user",
-			Content:     "no ttl",
-			SourceAgent: agent,
-			Trust:       memory.TrustAgent,
-			Confidence:  0.5,
-			Status:      memory.StatusActive,
-		})
+		_, err := s.Create(ctx, CreateParams{Type: memory.TypeTemporary, Scope: "user", Content: "no ttl",
+			SourceAgent: agent, Trust: memory.TrustAgent, Status: memory.StatusActive})
 		if err == nil {
-			t.Error("create succeeded; want constraint violation")
+			t.Error("temporary without ttl accepted")
 		}
 	})
 
-	t.Run("supersede marks the old memory superseded", func(t *testing.T) {
-		old, err := s.Create(ctx, CreateParams{
-			Type: memory.TypeProject, Scope: "project:example.com/a/b",
-			Content: "We deploy on Fridays", SourceAgent: agent,
-			Trust: memory.TrustAgent, Confidence: 0.5, Status: memory.StatusActive,
-		})
-		if err != nil {
-			t.Fatalf("create old: %v", err)
+	t.Run("embedding round-trip and validation", func(t *testing.T) {
+		m := create(t, CreateParams{Type: memory.TypeSemantic, Scope: "user", Content: "embedded",
+			Embedding: bagOfWords("embedded"), EmbeddingModel: "fake"})
+		if m.EmbeddingModel == nil || *m.EmbeddingModel != "fake" {
+			t.Errorf("embedding_model = %v", m.EmbeddingModel)
 		}
-
-		newM, err := s.Create(ctx, CreateParams{
-			Type: memory.TypeProject, Scope: "project:example.com/a/b",
-			Content: "We no longer deploy on Fridays", SourceAgent: agent,
-			Trust: memory.TrustAgent, Confidence: 0.5, Status: memory.StatusActive,
-			Supersedes: &old.ID,
-		})
-		if err != nil {
-			t.Fatalf("create new: %v", err)
-		}
-		if newM.Supersedes == nil || *newM.Supersedes != old.ID {
-			t.Errorf("supersedes = %v, want %s", newM.Supersedes, old.ID)
-		}
-
-		reloaded, err := s.Get(ctx, old.ID)
-		if err != nil {
-			t.Fatalf("get old: %v", err)
-		}
-		if reloaded.Status != memory.StatusSuperseded {
-			t.Errorf("old status = %q, want superseded", reloaded.Status)
-		}
-	})
-
-	t.Run("supersede of a missing memory fails", func(t *testing.T) {
-		missing := "00000000-0000-0000-0000-000000000000"
-		_, err := s.Create(ctx, CreateParams{
-			Type: memory.TypeSemantic, Scope: "user", Content: "x",
-			SourceAgent: agent, Trust: memory.TrustAgent, Confidence: 0.5,
-			Status: memory.StatusActive, Supersedes: &missing,
-		})
-		if err == nil {
-			t.Error("create succeeded; want ErrNotFound")
-		}
-	})
-
-	t.Run("soft delete is idempotent and records reason", func(t *testing.T) {
-		m, err := s.Create(ctx, CreateParams{
-			Type: memory.TypeSemantic, Scope: "user", Content: "wrong fact",
-			SourceAgent: agent, Trust: memory.TrustAgent, Confidence: 0.5,
-			Status: memory.StatusActive,
-		})
-		if err != nil {
-			t.Fatalf("create: %v", err)
-		}
-
-		d1, err := s.SoftDelete(ctx, m.ID, "outdated")
-		if err != nil {
-			t.Fatalf("soft delete: %v", err)
-		}
-		if d1.Status != memory.StatusDeleted {
-			t.Errorf("status = %q, want deleted", d1.Status)
-		}
-		if d1.Attrs["forget_reason"] != "outdated" {
-			t.Errorf("forget_reason = %v, want outdated", d1.Attrs["forget_reason"])
-		}
-
-		// Second delete must not error (idempotent).
-		d2, err := s.SoftDelete(ctx, m.ID, "")
-		if err != nil {
-			t.Fatalf("second soft delete: %v", err)
-		}
-		if d2.Status != memory.StatusDeleted {
-			t.Errorf("second status = %q, want deleted", d2.Status)
-		}
-	})
-
-	t.Run("get and delete of unknown id return ErrNotFound", func(t *testing.T) {
-		missing := "11111111-1111-1111-1111-111111111111"
-		if _, err := s.Get(ctx, missing); err != ErrNotFound {
-			t.Errorf("get err = %v, want ErrNotFound", err)
-		}
-		if _, err := s.SoftDelete(ctx, missing, ""); err != ErrNotFound {
-			t.Errorf("delete err = %v, want ErrNotFound", err)
-		}
-	})
-
-	t.Run("search finds active memories by scope and type", func(t *testing.T) {
-		scope := "project:example.com/search/repo"
-		mk := func(typ memory.Type, content string) {
-			if _, err := s.Create(ctx, CreateParams{
-				Type: typ, Scope: scope, Content: content, SourceAgent: agent,
-				Trust: memory.TrustAgent, Confidence: 0.5, Status: memory.StatusActive,
-			}); err != nil {
-				t.Fatal(err)
+		base := CreateParams{Type: memory.TypeSemantic, Scope: "user", Content: "x", SourceAgent: agent,
+			Trust: memory.TrustAgent, Status: memory.StatusActive}
+		bad := map[string]CreateParams{}
+		p := base
+		p.Embedding, p.EmbeddingModel = make([]float32, 3), "fake"
+		bad["wrong dim"] = p
+		p = base
+		p.Embedding = bagOfWords("x")
+		bad["missing model"] = p
+		p = base
+		v := bagOfWords("x")
+		v[5] = float32(math.NaN())
+		p.Embedding, p.EmbeddingModel = v, "fake"
+		bad["NaN"] = p
+		for name, p := range bad {
+			if _, err := s.Create(ctx, p); err == nil {
+				t.Errorf("%s: create succeeded", name)
 			}
 		}
-		mk(memory.TypeProject, "The deployment pipeline uses GitHub Actions and Docker")
-		mk(memory.TypeSemantic, "PostgreSQL full text search uses tsvector and tsquery")
-		// A user-wide memory must always be included in results.
-		if _, err := s.Create(ctx, CreateParams{
-			Type: memory.TypeSemantic, Scope: "user",
-			Content: "Docker images should be pinned by digest", SourceAgent: agent,
-			Trust: memory.TrustAgent, Confidence: 0.5, Status: memory.StatusActive,
-		}); err != nil {
+	})
+
+	t.Run("supersede", func(t *testing.T) {
+		old := create(t, CreateParams{Type: memory.TypeProject, Scope: "project:ex/sup", Content: "We deploy on Fridays"})
+		repl := create(t, CreateParams{Type: memory.TypeProject, Scope: "project:ex/sup", Content: "We never deploy on Fridays", Supersedes: &old.ID})
+		if repl.Supersedes == nil || *repl.Supersedes != old.ID {
+			t.Errorf("supersedes = %v", repl.Supersedes)
+		}
+		if got := status(t, old.ID); got != memory.StatusSuperseded {
+			t.Errorf("old status = %s, want superseded", got)
+		}
+		// Superseding the already-superseded memory again must fail.
+		_, err := s.Create(ctx, CreateParams{Type: memory.TypeProject, Scope: "project:ex/sup", Content: "third",
+			SourceAgent: agent, Trust: memory.TrustAgent, Status: memory.StatusActive, Supersedes: &old.ID})
+		if !errors.Is(err, ErrNotActive) {
+			t.Errorf("re-supersede err = %v, want ErrNotActive", err)
+		}
+		missing, bad := "22222222-2222-2222-2222-222222222222", "nope"
+		for id, want := range map[*string]error{&missing: ErrNotFound, &bad: ErrInvalidID} {
+			_, err := s.Create(ctx, CreateParams{Type: memory.TypeSemantic, Scope: "user", Content: "x",
+				SourceAgent: agent, Trust: memory.TrustAgent, Status: memory.StatusActive, Supersedes: id})
+			if !errors.Is(err, want) {
+				t.Errorf("supersede %q err = %v, want %v", *id, err, want)
+			}
+		}
+	})
+
+	t.Run("proposed supersede waits for approval", func(t *testing.T) {
+		old := create(t, CreateParams{Type: memory.TypePreference, Scope: "user", Content: "Prefers npm"})
+		prop := create(t, CreateParams{Type: memory.TypePreference, Scope: "user", Content: "Prefers pnpm",
+			Status: memory.StatusProposed, Supersedes: &old.ID})
+		if got := status(t, old.ID); got != memory.StatusActive {
+			t.Fatalf("old status before approval = %s, want active", got)
+		}
+		approved, err := s.Approve(ctx, prop.ID)
+		if err != nil || approved.Status != memory.StatusActive || approved.Trust != memory.TrustUser {
+			t.Fatalf("approve = %s/%s, %v; want active, trust=user", approved.Status, approved.Trust, err)
+		}
+		if got := status(t, old.ID); got != memory.StatusSuperseded {
+			t.Errorf("old status after approval = %s, want superseded", got)
+		}
+		if again, err := s.Approve(ctx, prop.ID); err != nil || again.Status != memory.StatusActive {
+			t.Errorf("second approve = %s, %v; want idempotent", again.Status, err)
+		}
+		if _, err := s.Approve(ctx, old.ID); !errors.Is(err, ErrNotProposed) {
+			t.Errorf("approve superseded err = %v, want ErrNotProposed", err)
+		}
+	})
+
+	t.Run("soft delete is idempotent and keeps the first reason", func(t *testing.T) {
+		m := create(t, CreateParams{Type: memory.TypeSemantic, Scope: "user", Content: "wrong fact"})
+		d1, err := s.SoftDelete(ctx, m.ID, "outdated", "codex")
+		if err != nil || d1.Status != memory.StatusDeleted {
+			t.Fatalf("delete = %+v, %v", d1, err)
+		}
+		if d1.Attrs["forget_reason"] != "outdated" || d1.Attrs["forgotten_by"] != "codex" {
+			t.Errorf("attrs = %v", d1.Attrs)
+		}
+		d2, err := s.SoftDelete(ctx, m.ID, "other", "claude-code")
+		if err != nil || d2.Status != memory.StatusDeleted || d2.Attrs["forget_reason"] != "outdated" || d2.Attrs["forgotten_by"] != "codex" {
+			t.Errorf("second delete = %+v, %v", d2.Attrs, err)
+		}
+		n := create(t, CreateParams{Type: memory.TypeSemantic, Scope: "user", Content: "no reason"})
+		d3, err := s.SoftDelete(ctx, n.ID, "", "codex")
+		if _, has := d3.Attrs["forget_reason"]; err != nil || has {
+			t.Errorf("empty reason stored: %v, %v", d3.Attrs, err)
+		}
+	})
+
+	t.Run("find duplicate", func(t *testing.T) {
+		m := create(t, CreateParams{Type: memory.TypeProject, Scope: "project:ex/dup", Content: "Use pgx v5"})
+		got, err := s.FindDuplicate(ctx, "project:ex/dup", memory.TypeProject, "Use pgx v5")
+		if err != nil || got.ID != m.ID {
+			t.Errorf("duplicate = %v, %v", got.ID, err)
+		}
+		for _, c := range []struct {
+			scope string
+			typ   memory.Type
+		}{{"project:ex/other", memory.TypeProject}, {"project:ex/dup", memory.TypeSemantic}} {
+			if _, err := s.FindDuplicate(ctx, c.scope, c.typ, "Use pgx v5"); !errors.Is(err, ErrNotFound) {
+				t.Errorf("duplicate in %s/%s err = %v", c.scope, c.typ, err)
+			}
+		}
+		if _, err := s.SoftDelete(ctx, m.ID, "", agent); err != nil {
 			t.Fatal(err)
 		}
+		if _, err := s.FindDuplicate(ctx, "project:ex/dup", memory.TypeProject, "Use pgx v5"); !errors.Is(err, ErrNotFound) {
+			t.Errorf("deleted memory counted as duplicate: %v", err)
+		}
+	})
 
-		// Query for "docker" should hit both the project and the user-wide memory.
-		got, err := s.Search(ctx, SearchParams{Query: "docker", Scope: scope, Limit: 10})
+	t.Run("lexical search", func(t *testing.T) {
+		scope := "project:ex/search"
+		pipeline := create(t, CreateParams{Type: memory.TypeProject, Scope: scope, Content: "The deployment pipeline uses GitHub Actions and Docker"})
+		create(t, CreateParams{Type: memory.TypeSemantic, Scope: scope, Content: "PostgreSQL full text search uses tsvector"})
+		userWide := create(t, CreateParams{Type: memory.TypeSemantic, Scope: "user", Content: "Docker images should be pinned by digest"})
+		other := create(t, CreateParams{Type: memory.TypeProject, Scope: "project:ex/elsewhere", Content: "Docker compose is used elsewhere"})
+		past := time.Now().Add(-time.Minute)
+		expired := create(t, CreateParams{Type: memory.TypeTemporary, Scope: scope, Content: "Docker temp note", ExpiresAt: &past})
+
+		got, err := s.Search(ctx, SearchParams{Query: "docker", Scope: scope})
 		if err != nil {
-			t.Fatalf("search: %v", err)
+			t.Fatal(err)
 		}
-		if len(got) < 2 {
-			t.Fatalf("search docker returned %d, want >= 2", len(got))
-		}
+		ids := map[string]float64{}
 		for _, r := range got {
-			if r.Score <= 0 {
-				t.Errorf("result %q has score %v, want > 0", r.Content, r.Score)
+			ids[r.ID] = r.Score
+			if r.Score <= 0 || r.Score > 1.0000001 {
+				t.Errorf("score %v out of (0,1]", r.Score)
 			}
 		}
-
-		// Natural-language query with extra words still matches on shared terms
-		// (OR semantics), rather than requiring every lexeme to be present.
-		nl, err := s.Search(ctx, SearchParams{
-			Query: "how does the deployment pipeline work", Scope: scope, Limit: 10,
-		})
-		if err != nil {
-			t.Fatalf("search nl: %v", err)
+		if _, ok := ids[pipeline.ID]; !ok {
+			t.Error("project memory not found")
 		}
-		if len(nl) == 0 {
-			t.Error("natural-language query matched nothing; want OR semantics to find the pipeline memory")
+		if _, ok := ids[userWide.ID]; !ok {
+			t.Error("user-wide memory not included")
+		}
+		if _, ok := ids[other.ID]; ok {
+			t.Error("other project's memory leaked into results")
+		}
+		if _, ok := ids[expired.ID]; ok {
+			t.Error("expired memory returned")
+		}
+		if len(got) > 0 && math.Abs(got[0].Score-1) > 1e-9 {
+			t.Errorf("top lexical-only score = %v, want 1.0", got[0].Score)
 		}
 
-		// Type filter restricts results.
-		typed, err := s.Search(ctx, SearchParams{
-			Query: "docker", Scope: scope, Types: []memory.Type{memory.TypeProject}, Limit: 10,
-		})
+		nl, err := s.Search(ctx, SearchParams{Query: "how does the deployment pipeline work", Scope: scope})
+		if err != nil || len(nl) == 0 || nl[0].ID != pipeline.ID {
+			t.Errorf("natural-language query: %d results, err %v; want pipeline first", len(nl), err)
+		}
+
+		typed, err := s.Search(ctx, SearchParams{Query: "docker", Scope: scope, Types: []memory.Type{memory.TypeSemantic}})
 		if err != nil {
-			t.Fatalf("search typed: %v", err)
+			t.Fatal(err)
 		}
 		for _, r := range typed {
-			if r.Type != memory.TypeProject {
-				t.Errorf("type filter leaked %q", r.Type)
+			if r.Type != memory.TypeSemantic {
+				t.Errorf("type filter leaked %s", r.Type)
 			}
 		}
 
-		// A deleted memory must not appear.
-		del, err := s.Create(ctx, CreateParams{
-			Type: memory.TypeProject, Scope: scope,
-			Content: "kubernetes cluster autoscaling notes", SourceAgent: agent,
-			Trust: memory.TrustAgent, Confidence: 0.5, Status: memory.StatusActive,
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := s.SoftDelete(ctx, del.ID, "test"); err != nil {
-			t.Fatal(err)
-		}
-		afterDel, err := s.Search(ctx, SearchParams{Query: "kubernetes", Scope: scope, Limit: 10})
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, r := range afterDel {
-			if r.ID == del.ID {
-				t.Error("deleted memory returned by search")
+		for _, q := range []string{"", "???", "a&b | !c <-> (d)", "O'Reilly", "한국어 검색"} {
+			if _, err := s.Search(ctx, SearchParams{Query: q, Scope: scope}); err != nil {
+				t.Errorf("Search(%q) error: %v", q, err)
 			}
 		}
 	})
 
-	t.Run("list by scope and types returns active only, newest first", func(t *testing.T) {
-		scope := "project:example.com/list/repo"
-		for _, c := range []string{"first project note", "second project note"} {
-			if _, err := s.Create(ctx, CreateParams{
-				Type: memory.TypeProject, Scope: scope, Content: c, SourceAgent: agent,
-				Trust: memory.TrustAgent, Confidence: 0.5, Status: memory.StatusActive,
-			}); err != nil {
-				t.Fatal(err)
-			}
+	t.Run("hybrid search", func(t *testing.T) {
+		scope := "project:ex/hybrid"
+		emb := fakeEmbedder{model: "fake-v1"}
+		mk := func(content, model string) Memory {
+			return create(t, CreateParams{Type: memory.TypeProject, Scope: scope, Content: content,
+				Embedding: bagOfWords(content), EmbeddingModel: model})
 		}
-		got, err := s.ListByScopeTypes(ctx, []string{scope}, []memory.Type{memory.TypeProject}, 50)
+		target := mk("alpha beta gamma delta", "fake-v1")
+		otherModel := mk("alpha beta gamma epsilon", "fake-v0")
+		mk("completely unrelated words here", "fake-v1")
+
+		// No lexical overlap with the query text, but the vector matches.
+		qv, _ := emb.Embed(ctx, []string{"alpha beta gamma"})
+		got, err := s.Search(ctx, SearchParams{Query: "zzz", Scope: scope, Vector: qv[0], Model: "fake-v1"})
 		if err != nil {
-			t.Fatalf("list: %v", err)
-		}
-		if len(got) != 2 {
-			t.Fatalf("list returned %d, want 2", len(got))
-		}
-		if got[0].Content != "second project note" {
-			t.Errorf("newest first violated: got[0] = %q", got[0].Content)
-		}
-	})
-
-	t.Run("latest handoff returns newest unexpired, none after expiry", func(t *testing.T) {
-		scope := "project:example.com/handoff/repo"
-		mkHandoff := func(content string, ttl time.Duration) string {
-			exp := time.Now().Add(ttl)
-			m, err := s.Create(ctx, CreateParams{
-				Type: memory.TypeTemporary, Scope: scope, Content: content,
-				Attrs:       map[string]any{"kind": "handoff"},
-				SourceAgent: agent, Trust: memory.TrustAgent, Confidence: 0.5,
-				Status: memory.StatusActive, ExpiresAt: &exp,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			return m.ID
-		}
-
-		// None yet.
-		if _, err := s.LatestHandoff(ctx, scope); err != ErrNotFound {
-			t.Errorf("empty handoff err = %v, want ErrNotFound", err)
-		}
-
-		mkHandoff("older handoff", time.Hour)
-		time.Sleep(2 * time.Millisecond)
-		mkHandoff("newer handoff", time.Hour)
-
-		latest, err := s.LatestHandoff(ctx, scope)
-		if err != nil {
-			t.Fatalf("latest: %v", err)
-		}
-		if latest.Content != "newer handoff" {
-			t.Errorf("latest = %q, want 'newer handoff'", latest.Content)
-		}
-
-		// An expired handoff is not returned.
-		expiredScope := "project:example.com/handoff/expired"
-		exp := time.Now().Add(-time.Minute)
-		if _, err := s.Create(ctx, CreateParams{
-			Type: memory.TypeTemporary, Scope: expiredScope, Content: "expired",
-			Attrs:       map[string]any{"kind": "handoff"},
-			SourceAgent: agent, Trust: memory.TrustAgent, Confidence: 0.5,
-			Status: memory.StatusActive, ExpiresAt: &exp,
-		}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.LatestHandoff(ctx, expiredScope); err != ErrNotFound {
-			t.Errorf("expired handoff err = %v, want ErrNotFound", err)
+		if len(got) != 1 || got[0].ID != target.ID {
+			t.Fatalf("vector-only search = %v; want only the fake-v1 target", contents(got))
+		}
+		for _, r := range got {
+			if r.ID == otherModel.ID {
+				t.Error("memory embedded by another model was compared")
+			}
+		}
+		// First in both rankings scores exactly 1.0. (For "alpha beta gamma" the two
+		// alpha memories tie on ts_rank and the newer one wins the tie.)
+		qv2, _ := emb.Embed(ctx, []string{"alpha beta gamma delta"})
+		both, err := s.Search(ctx, SearchParams{Query: "alpha beta gamma delta", Scope: scope, Vector: qv2[0], Model: "fake-v1"})
+		if err != nil || len(both) == 0 || both[0].ID != target.ID || math.Abs(both[0].Score-1) > 1e-9 {
+			t.Errorf("hybrid top = %v (score %v), err %v; want target with score 1.0", contents(both), scoreOf(both), err)
+		}
+		// A distant vector is cut off by MaxDistance.
+		far, _ := emb.Embed(ctx, []string{"nothing in common"})
+		none, err := s.Search(ctx, SearchParams{Query: "zzz", Scope: scope, Vector: far[0], Model: "fake-v1", MaxDistance: 0.3})
+		if err != nil || len(none) != 0 {
+			t.Errorf("far vector returned %v, %v", contents(none), err)
+		}
+		if _, err := s.Search(ctx, SearchParams{Query: "q", Vector: qv[0]}); err == nil {
+			t.Error("vector without model accepted")
 		}
 	})
+
+	t.Run("list", func(t *testing.T) {
+		scope := "project:ex/list"
+		a := create(t, CreateParams{Type: memory.TypeProject, Scope: scope, Content: "first"})
+		b := create(t, CreateParams{Type: memory.TypeProject, Scope: scope, Content: "second"})
+		p := create(t, CreateParams{Type: memory.TypePreference, Scope: scope, Content: "proposed pref", Status: memory.StatusProposed})
+		got, err := s.List(ctx, ListParams{Scopes: []string{scope}, Types: []memory.Type{memory.TypeProject}})
+		if err != nil || len(got) != 2 || got[0].ID != b.ID || got[1].ID != a.ID {
+			t.Errorf("list = %v, %v; want [second first]", contentsM(got), err)
+		}
+		props, err := s.List(ctx, ListParams{Scopes: []string{scope}, Statuses: []memory.Status{memory.StatusProposed}})
+		if err != nil || len(props) != 1 || props[0].ID != p.ID {
+			t.Errorf("proposed list = %v, %v", contentsM(props), err)
+		}
+	})
+
+	t.Run("handoff lifecycle", func(t *testing.T) {
+		scope := "project:ex/handoff"
+		if _, err := s.LatestHandoff(ctx, scope, false); !errors.Is(err, ErrNotFound) {
+			t.Errorf("empty scope err = %v", err)
+		}
+		exp := time.Now().Add(time.Hour)
+		h1, err := s.CreateHandoff(ctx, HandoffParams{Scope: scope, Summary: "first", SourceAgent: "claude-code", ExpiresAt: exp})
+		if err != nil {
+			t.Fatal(err)
+		}
+		h2, err := s.CreateHandoff(ctx, HandoffParams{Scope: scope, Summary: "second", NextSteps: []string{"a", "b"}, SourceAgent: "claude-code", ExpiresAt: exp})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := status(t, h1.ID); got != memory.StatusSuperseded {
+			t.Errorf("older handoff status = %s, want superseded", got)
+		}
+		if h2.Supersedes == nil || *h2.Supersedes != h1.ID {
+			t.Errorf("new handoff supersedes = %v, want %s", h2.Supersedes, h1.ID)
+		}
+		steps, _ := h2.Attrs["next_steps"].([]any)
+		if len(steps) != 2 || steps[0] != "a" || h2.Attrs["kind"] != "handoff" {
+			t.Errorf("attrs = %v", h2.Attrs)
+		}
+
+		pending, err := s.LatestHandoff(ctx, scope, true)
+		if err != nil || pending.ID != h2.ID {
+			t.Fatalf("pending = %v, %v", pending.ID, err)
+		}
+		r1, err := s.MarkResumed(ctx, h2.ID, "codex")
+		if err != nil || r1.Attrs["resumed_by"] != "codex" || r1.Attrs["resumed_at"] == nil {
+			t.Fatalf("mark resumed = %v, %v", r1.Attrs, err)
+		}
+		r2, err := s.MarkResumed(ctx, h2.ID, "opencode")
+		if err != nil || r2.Attrs["resumed_by"] != "codex" {
+			t.Errorf("second resume overwrote first: %v, %v", r2.Attrs, err)
+		}
+		if _, err := s.LatestHandoff(ctx, scope, true); !errors.Is(err, ErrNotFound) {
+			t.Errorf("resumed handoff still pending: %v", err)
+		}
+		if latest, err := s.LatestHandoff(ctx, scope, false); err != nil || latest.ID != h2.ID {
+			t.Errorf("latest (incl. resumed) = %v, %v", latest.ID, err)
+		}
+
+		past := time.Now().Add(-time.Minute)
+		if _, err := s.CreateHandoff(ctx, HandoffParams{Scope: "project:ex/expired", Summary: "old", SourceAgent: "x", ExpiresAt: past}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.LatestHandoff(ctx, "project:ex/expired", false); !errors.Is(err, ErrNotFound) {
+			t.Errorf("expired handoff returned: %v", err)
+		}
+	})
+
+	t.Run("backfill", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `TRUNCATE memory CASCADE`); err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range []string{"one", "two", "three"} {
+			create(t, CreateParams{Type: memory.TypeSemantic, Scope: "user", Content: c})
+		}
+		create(t, CreateParams{Type: memory.TypePreference, Scope: "user", Content: "proposed", Status: memory.StatusProposed})
+		gone := create(t, CreateParams{Type: memory.TypeSemantic, Scope: "user", Content: "deleted"})
+		if _, err := s.SoftDelete(ctx, gone.ID, "", agent); err != nil {
+			t.Fatal(err)
+		}
+
+		st, err := s.Backfill(ctx, fakeEmbedder{model: "fake-v1"}, 2) // batch < rows exercises paging
+		if err != nil || st.Embedded != 4 || st.Skipped != 0 {
+			t.Fatalf("backfill = %+v, %v; want 4 embedded (active + proposed, not deleted)", st, err)
+		}
+		if st, err := s.Backfill(ctx, fakeEmbedder{model: "fake-v1"}, 2); err != nil || st.Embedded != 0 {
+			t.Errorf("second backfill = %+v, %v; want 0", st, err)
+		}
+		if st, err := s.Backfill(ctx, fakeEmbedder{model: "fake-v2"}, 100); err != nil || st.Embedded != 4 {
+			t.Errorf("backfill after model change = %+v, %v; want 4", st, err)
+		}
+		got, err := s.Search(ctx, SearchParams{Query: "zzz", Vector: bagOfWords("two"), Model: "fake-v2"})
+		if err != nil || len(got) != 1 || got[0].Content != "two" {
+			t.Errorf("search after backfill = %v, %v", contents(got), err)
+		}
+
+		// A provider that rejects one input must not block the others.
+		picky := pickyEmbedder{fakeEmbedder{model: "fake-v3"}, "three"}
+		if st, err := s.Backfill(ctx, picky, 100); err != nil || st.Embedded != 3 || st.Skipped != 1 {
+			t.Errorf("picky backfill = %+v, %v; want 3 embedded, 1 skipped", st, err)
+		}
+		// A provider that is down fails the run without touching rows.
+		if _, err := s.Backfill(ctx, downEmbedder{"fake-v4"}, 100); err == nil {
+			t.Error("backfill with a down provider returned no error")
+		}
+	})
+}
+
+func contents(rs []Scored) []string {
+	out := make([]string, len(rs))
+	for i, r := range rs {
+		out[i] = r.Content
+	}
+	return out
+}
+
+func contentsM(ms []Memory) []string {
+	out := make([]string, len(ms))
+	for i, m := range ms {
+		out[i] = m.Content
+	}
+	return out
+}
+
+func scoreOf(rs []Scored) float64 {
+	if len(rs) == 0 {
+		return 0
+	}
+	return rs[0].Score
 }
