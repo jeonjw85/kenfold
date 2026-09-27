@@ -1,0 +1,46 @@
+# Local development stack. Both ports are published on 127.0.0.1 only:
+# Phase 0 has no authentication, and these credentials are for local use only.
+name: kenfold
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.6-pg18-trixie
+    environment:
+      POSTGRES_USER: kenfold
+      POSTGRES_PASSWORD: ${KENFOLD_DB_PASSWORD:-kenfold}
+      POSTGRES_DB: kenfold
+    ports:
+      - "127.0.0.1:54329:5432"
+    volumes:
+      # PostgreSQL 18+ images keep data under /var/lib/postgresql/<major>/docker.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      # -h forces TCP so the check fails during the init-time temporary server.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U kenfold -d kenfold"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+
+  kenfold:
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-none}
+        DATE: ${DATE:-unknown}
+    image: kenfold:dev
+    environment:
+      KENFOLD_DATABASE_URL: postgres://kenfold:${KENFOLD_DB_PASSWORD:-kenfold}@postgres:5432/kenfold?sslmode=disable
+      KENFOLD_AUTO_MIGRATE: "true"
+      KENFOLD_LOG_LEVEL: ${KENFOLD_LOG_LEVEL:-info}
+    ports:
+      - "127.0.0.1:7077:7077"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

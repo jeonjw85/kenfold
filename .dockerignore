@@ -1,0 +1,9 @@
+.git
+.github
+bin
+dist
+*.md
+!README.md
+compose.yaml
+Makefile
+.env
