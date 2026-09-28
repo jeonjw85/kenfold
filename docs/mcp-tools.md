@@ -8,7 +8,8 @@ Contract for the tools Kenfold exposes over MCP. Schemas are generated from the 
 - **Memory types**: `semantic`, `episodic`, `project`, `preference`, `codebase`, `temporary` (see [ADR-0001](adr/0001-architecture.md#memory-model)).
 - **Trust**: `user` (confirmed by the user, e.g. an approved preference), `agent` (written by an agent), `external` (derived from external content). Clients should treat `external` memories with extra caution.
 - **Status**: `proposed`, `active`, `superseded`, `deleted`. Reads return `active`, unexpired memories only.
-- **The calling agent** (`source_agent`) is determined by the server, never from tool arguments. Over HTTP it is the agent the API key was created for. For stdio servers it is `KENFOLD_AGENT`; without it, the client's `clientInfo.name` (lowercased, sanitized). If none is available, `unknown`.
+- **The calling agent** (`source_agent`) is determined by the server, never from tool arguments. Over HTTP it is the agent the API key was created for, or, for OAuth clients, the agent name the owner chose on the consent page. For stdio servers it is `KENFOLD_AGENT`; without it, the client's `clientInfo.name` (lowercased, sanitized). If none is available, `unknown`.
+- **Access**: API keys can read and write. OAuth clients get the access the owner approved, `memory:read` or `memory:write` (which includes read). With read-only access every tool is listed, but `remember`, `handoff`, `resume` (it records who picked up the handoff), and `forget` fail with a tool error that says so. `get_context` and `recall` are annotated read-only; clients such as ChatGPT run them without asking for confirmation. See [docs/deploy.md](deploy.md) and [ADR-0003](adr/0003-remote-access-and-oauth.md).
 - **Errors**: invalid arguments are rejected by schema validation before reaching the handler. Domain errors (bad id, oversized input, superseding a retired memory) are returned as tool errors (`isError: true`) with a message the model can act on. Internal failures return a generic tool error; details go to the server log only.
 - **Secrets**: `remember` and `handoff` reject content that contains credentials (provider API keys and tokens, private keys, JWTs, passwords in URLs, random-looking values assigned to secret-named fields). The error names the kind of secret, never its value. `forget` reasons and search queries are redacted instead of rejected.
 - **Sessions**: a client may send `_meta: {"kenfold/session_id": "<id>"}` with a tool call; it is recorded as the memory's `source_session`. `kenfold hook` does this for session summaries.
@@ -175,9 +176,28 @@ Optional fields: `expires_at` (temporary memories and handoffs), `next_steps` an
 
 Non-agent clients use a small REST API under `/api/v1`, behind the same Host allowlist, cross-origin protection, and API keys as `/mcp`. Errors are `{"error": "..."}`.
 
+Writes (`POST /api/v1/refs/check`) need write access; read-only OAuth clients get 403.
+
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/v1/refs?project=P` | References to check for project `P`: `{"scope", "targets": [{"path", "symbol", "anchor_commit", "anchor_hash"}]}`, unanchored ones first (at most 500) |
 | `POST /api/v1/refs/check` | Report `{"project", "commit", "results": [{"path", "symbol", "anchor_commit", "found", "hash", "resolved_path"}]}` (at most 1000 results); returns counts by resulting state |
 
 A result without `anchor_commit` anchors the pending references to its target at `commit` (`found: false` marks them `unresolved`, and they are offered again later). A result with `anchor_commit` compares against the hash anchored at that commit.
+
+## Authorization (OAuth)
+
+With `KENFOLD_PUBLIC_URL` set, `/mcp` and `/api/v1` also accept OAuth access tokens, and a request without a valid token gets `401` with `WWW-Authenticate: Bearer resource_metadata="<public URL>/.well-known/oauth-protected-resource/mcp"`.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /.well-known/oauth-protected-resource/mcp` | Protected Resource Metadata (RFC 9728): the resource `<public URL>/mcp`, its authorization server, and the scopes `memory:read` and `memory:write` |
+| `GET /.well-known/oauth-authorization-server` | Authorization server metadata (RFC 8414); also served as `/.well-known/openid-configuration` |
+| `GET, POST /oauth/authorize` | Authorization code flow with PKCE (S256 only); shows the consent page. Responses include `iss` (RFC 9207) |
+| `POST /oauth/token` | `authorization_code` and `refresh_token` grants. Clients authenticate with `none` (public) or `private_key_jwt` |
+| `POST /oauth/register` | Dynamic client registration (RFC 7591), public clients only; off with `KENFOLD_OAUTH_DCR=false` |
+| `POST /oauth/revoke` | Token revocation (RFC 7009) |
+
+- **Client identification.** A `client_id` that is an https URL is a Client ID Metadata Document, fetched from that URL with SSRF protections.
+- **Resource indicators.** They may only name `<public URL>/mcp`; tokens are bound to it.
+- **Token lifetimes.** Access tokens last an hour. Refresh tokens last 30 days and are replaced on every use. Presenting a replaced refresh token, or an authorization code twice, revokes the client's grant.

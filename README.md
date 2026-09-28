@@ -20,7 +20,7 @@ What makes it different (see [ADR-0001](docs/adr/0001-architecture.md)):
 - **Handoff** between agents: stop in Claude Code, resume in Codex
 - **Poisoning-aware**: memory is served as data, never as instructions; preferences need your approval
 
-> **Status: Phase 3.** Shared storage, hybrid search with **reranking, graph expansion, and recency**, API keys, setup for Claude Code, Codex, and OpenCode, a server-side **secret filter**, duplicate and contradiction hints, **session hooks** that load memory at session start and record a summary at session end, optional **model-based extraction** that turns session summaries into memories for your review, and **code references**: memories about code are flagged when that code changes or disappears.
+> **Status: Phase 4.** Shared storage, hybrid search with **reranking, graph expansion, and recency**, API keys, setup for Claude Code, Codex, and OpenCode, a server-side **secret filter**, duplicate and contradiction hints, **session hooks** that load memory at session start and record a summary at session end, optional **model-based extraction** that turns session summaries into memories for your review, **code references** that flag memories whose code changed or disappeared, and **remote access** with a built-in OAuth server for ChatGPT, claude.ai, and agents on other machines.
 
 ## Quickstart
 
@@ -92,7 +92,14 @@ env = { KENFOLD_AGENT = "codex" }
 
 With `make up-embed`, also set `KENFOLD_EMBED_URL=http://127.0.0.1:11435/v1` for stdio servers.
 
-**ChatGPT** needs a public HTTPS endpoint with OAuth; planned for Phase 4.
+**ChatGPT, claude.ai, and other machines** need a public HTTPS URL, behind a tunnel or a reverse proxy, with `KENFOLD_PUBLIC_URL` set:
+
+```sh
+KENFOLD_PUBLIC_URL=https://kenfold.example.com make up
+docker compose exec kenfold /usr/local/bin/kenfold oauth password   # asked for when you approve a client
+```
+
+This turns on Kenfold's OAuth 2.1 server. ChatGPT and claude.ai find it on their own, and you approve each on a consent page, read-only or read and write. Agents with API keys use the public URL as before. See [docs/deploy.md](docs/deploy.md) for Tailscale Funnel, Cloudflare Tunnel, and Caddy, and read its checklist before exposing your memory to the internet.
 
 ## Session hooks (Claude Code, Codex)
 
@@ -201,8 +208,9 @@ Full contract: [docs/mcp-tools.md](docs/mcp-tools.md).
 
 ## Security
 
-- Ports are published on `127.0.0.1` only. Do not expose Kenfold to a network: there is no TLS, and until OAuth (Phase 4) there is no per-user authorization; any valid key can read all memory.
-- `/mcp` requires an API key (`KENFOLD_AUTH=apikey`, the default). Only a SHA-256 hash of each key is stored. Revoke a key with `bin/kenfold key revoke <prefix>`.
+- Ports are published on `127.0.0.1` only. Kenfold has no TLS of its own: expose it only through a tunnel or a TLS reverse proxy, with `KENFOLD_PUBLIC_URL` set (see [docs/deploy.md](docs/deploy.md)).
+- `/mcp` requires an API key (`KENFOLD_AUTH=apikey`, the default) or an OAuth access token. Only SHA-256 hashes of keys and tokens are stored. Revoke a key with `bin/kenfold key revoke <prefix>` and an OAuth client with `kenfold oauth revoke <grant>`.
+- Every key and approved OAuth client can read all memory (Kenfold has one owner). OAuth clients can be limited to read-only, and the consent page preselects read-only. It is protected by the owner password (Argon2id, locked for 15 minutes after five wrong attempts).
 - `/mcp` and the REST API (`/api/v1`, used by `kenfold refs sync` and the hook) enforce a Host allowlist (DNS rebinding) and reject cross-site browser requests. `/healthz` and `/readyz` are unauthenticated and expose no data.
 - `KENFOLD_AUTH=none` disables authentication; every write is then attributed to the client's self-reported name.
 - The secret filter is pattern-based: it catches well-known token formats and random-looking values assigned to secret-named fields, not every possible secret. Treat it as a safety net; agents are still told never to store secrets.
@@ -223,6 +231,9 @@ kenfold memory reject <id>... [--reason R]
 kenfold memory forget <id> [--reason R]
 kenfold extract status               extraction progress
 kenfold extract run [--limit N]      extract memories from session summaries now
+kenfold oauth password               set the owner password for the OAuth consent page
+kenfold oauth clients [--all]        approved OAuth clients (ChatGPT, claude.ai, ...)
+kenfold oauth revoke <grant>         revoke an OAuth client and its tokens
 kenfold refs sync [--dir D] [--quiet]
                                      check the code memories refer to against the repository's HEAD
 kenfold refs status [--scope S]      code reference states and memories that may be outdated
@@ -244,6 +255,9 @@ kenfold version
 | `KENFOLD_AUTO_MIGRATE` | `false` (`true` in compose); `serve` and `mcp` refuse to run on an outdated schema |
 | `KENFOLD_ALLOWED_HOSTS` | `localhost,127.0.0.1,::1`, the Host allowlist for `/mcp` |
 | `KENFOLD_AUTH` | `apikey`, or `none` |
+| `KENFOLD_PUBLIC_URL` | unset. The https URL remote clients reach Kenfold at, e.g. `https://kenfold.example.com` (no path); its host is added to `KENFOLD_ALLOWED_HOSTS`, and it enables OAuth |
+| `KENFOLD_OAUTH` | on when `KENFOLD_PUBLIC_URL` is set; the built-in OAuth 2.1 authorization server |
+| `KENFOLD_OAUTH_DCR` | `true`; dynamic client registration (clients identified by a metadata document URL work either way) |
 | `KENFOLD_AGENT` | agent name for `kenfold mcp` (stdio), e.g. `codex` |
 | `KENFOLD_EMBED_URL` | unset (full-text search only). Any OpenAI-compatible embeddings API, e.g. `http://127.0.0.1:11434/v1` for Ollama |
 | `KENFOLD_EMBED_MODEL` | `bge-m3`. Must produce 1024-dimensional vectors |
@@ -271,7 +285,7 @@ Changing `KENFOLD_EMBED_MODEL` to another 1024-dimensional model needs no migrat
 
 ```sh
 make test               # unit tests + stdio end-to-end test (no database needed)
-make test-integration   # store, API key, migration, cross-agent, handoff, and code-reference tests against the compose Postgres
+make test-integration   # store, API key, migration, cross-agent, handoff, code-reference, and OAuth tests against the compose Postgres
 make lint               # gofmt + go vet
 make eval               # extraction quality against a real model (needs make up-extract)
 make eval-search        # retrieval quality per pipeline stage (needs make up-embed)
@@ -294,11 +308,14 @@ internal/extract/     model-based memory extraction and classification; eval set
 internal/chat/        OpenAI-compatible chat client (structured output)
 internal/secrets/     credential detection and redaction
 internal/apikey/      API keys and the bearer-token verifier
+internal/oauth/       OAuth 2.1 authorization server: metadata, consent, tokens, client metadata documents
+internal/authz/       access levels (read, write) shared by the tools and the API
 internal/embed/       OpenAI-compatible embeddings client
 internal/httpserver/  HTTP routing, health probes, Host/CORS protection, auth for /mcp and /api
 internal/memory/      domain types (memory types, trust, status, scopes, agent names)
 internal/config/      environment configuration
 migrations/           SQL migrations (goose, embedded in the binary)
+deploy/               reverse proxy example (Caddy) for remote access
 docs/                 ADRs and specs
 ```
 
@@ -311,5 +328,5 @@ docs/                 ADRs and specs
 | **2** ✅ | Secret filter, duplicate and contradiction hints, session hooks with automatic session summaries |
 | **2b** ✅ | Model-based extraction of memories from sessions (reviewed), type classification |
 | **3** ✅ | Rerank, graph expansion, recency and staleness in ranking, code references with commit-based invalidation (tree-sitter symbols), REST API |
-| 4 | OAuth 2.1, remote deployment, ChatGPT, object storage |
+| **4** ✅ | OAuth 2.1 authorization server (client metadata documents, dynamic registration, `private_key_jwt`, read-only grants), remote deployment behind a tunnel or proxy; verified end to end with the MCP SDK's OAuth client over HTTPS, not yet from ChatGPT itself. Object storage and an OpenAI-compatible proxy were deferred ([ADR-0003](docs/adr/0003-remote-access-and-oauth.md)) |
 | 5 | Consolidation, review dashboard, benchmarks |

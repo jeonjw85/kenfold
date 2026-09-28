@@ -63,9 +63,9 @@ Constraints enforce the invariants that must never be violated by any writer: va
 
 ### Security posture
 
-- Phase 0–1 are **local only**: bind to loopback; compose publishes ports on `127.0.0.1` only.
+- Kenfold listens on loopback by default; compose publishes ports on `127.0.0.1` only. Since Phase 4 it can be reached remotely through a tunnel or TLS proxy with `KENFOLD_PUBLIC_URL` (see [ADR-0003](0003-remote-access-and-oauth.md)).
 - `/mcp` enforces a Host allowlist (DNS-rebinding defense) and rejects cross-origin browser requests. The SDK's built-in rebinding check only applies to connections arriving on a loopback address, which is not the case behind Docker port publishing, so Kenfold enforces its own.
-- Auth: API keys since Phase 1 (one per agent; only a SHA-256 hash is stored; the key, not the client's self-reported name, determines `source_agent`). OAuth 2.1 in Phase 4. **ChatGPT requires a public HTTPS endpoint with OAuth**, which exposes the whole memory store; it is gated on Phase 4 auth.
+- Auth: API keys since Phase 1 (one per agent; only a SHA-256 hash is stored; the key, not the client's self-reported name, determines `source_agent`). Since Phase 4, a built-in OAuth 2.1 authorization server for remote clients such as ChatGPT: the owner approves each client on a password-protected consent page, read-only or read and write, and names the agent its writes are attributed to.
 - Secret filter on writes since Phase 2: `remember` and `handoff` reject content with credentials, hooks redact captured text locally before it is written to disk, and `kenfold scan --redact` cleans memories stored earlier. Memory is rendered to agents as data, and `trust = external` content is never auto-promoted.
 
 ### Defaults chosen
@@ -83,7 +83,7 @@ Constraints enforce the invariants that must never be violated by any writer: va
 | 2 | Secret filter on writes, normalized dedup, similarity/contradiction hints, hook-based auto-capture of session summaries (Claude Code, Codex), handoff | handoff scenario E2E passes |
 | 2b | Model-based extraction of memories from session summaries (proposed for review by default) and type classification, with a local chat model (default `qwen3.5:4b`) | extracted memories measured on an internal eval set (dev + holdout; see `internal/extract/testdata/RESULTS.md`) |
 | 3 | Graph expansion, recency and staleness signals, rerank, code references with commit-based invalidation (tree-sitter symbols), REST API; see [ADR-0002](0002-retrieval-and-code-refs.md) | recall@5 ≥ 0.90 dev / ≥ 0.85 holdout on the internal eval set, never below the hybrid baseline |
-| 4 | OAuth 2.1, HTTPS deployment/tunnel, object storage, ChatGPT, OpenAI-compatible proxy for local LLMs | recall works from ChatGPT |
+| 4 | OAuth 2.1 authorization server, remote deployment behind a tunnel or TLS proxy; object storage and an OpenAI-compatible proxy deferred (see [ADR-0003](0003-remote-access-and-oauth.md)) | recall works from ChatGPT. Verified with the MCP SDK's OAuth client over HTTPS and against ChatGPT's published client metadata; a real ChatGPT connection awaits a public deployment |
 | 5 | Consolidation workers, review dashboard, LongMemEval/LoCoMo evals, export/import | ongoing |
 
 ## Consequences
