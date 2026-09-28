@@ -169,6 +169,7 @@ func (c *cli) memoryList(ctx context.Context, args []string) error {
 	types := fs.String("type", "", "comma-separated memory types (default: all)")
 	scope := fs.String("scope", "", "'user', 'project:<id>', or a git remote URL / project name (default: all scopes)")
 	limit := fs.Int("limit", 50, "maximum rows (1-500)")
+	stale := fs.Bool("stale", false, "only memories whose referenced code was removed or changed")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -179,7 +180,7 @@ func (c *cli) memoryList(ctx context.Context, args []string) error {
 	if *limit < 1 || *limit > 500 {
 		return usageErr("--limit must be between 1 and 500")
 	}
-	p := store.ListParams{Limit: *limit}
+	p := store.ListParams{Limit: *limit, Stale: *stale}
 	for _, s := range splitList(*statuses) {
 		st := memory.Status(s)
 		switch st {

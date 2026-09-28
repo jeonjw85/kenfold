@@ -12,7 +12,9 @@ ARG COMMIT=none
 ARG DATE=unknown
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath \
+    # The server never parses code (clients do, in the repository), so no
+    # tree-sitter grammars are embedded.
+    CGO_ENABLED=0 go build -trimpath -tags grammar_subset \
       -ldflags "-s -w \
         -X github.com/kenfold/kenfold/internal/buildinfo.Version=${VERSION} \
         -X github.com/kenfold/kenfold/internal/buildinfo.Commit=${COMMIT} \

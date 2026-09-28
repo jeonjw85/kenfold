@@ -89,8 +89,20 @@ func TestChatConfig(t *testing.T) {
 	}
 }
 
+func TestRerankConfig(t *testing.T) {
+	c, err := LoadFrom(env(nil))
+	if err != nil || c.Rerank.Enabled() || c.Rerank.Model != DefaultRerankModel {
+		t.Errorf("defaults: %+v %v", c.Rerank, err)
+	}
+	c, err = LoadFrom(env(map[string]string{"KENFOLD_RERANK_URL": " http://reranker:8080/v1 ", "KENFOLD_RERANK_MODEL": "jina-reranker-v2-base-multilingual", "KENFOLD_RERANK_API_KEY": "k"}))
+	if err != nil || !c.Rerank.Enabled() || c.Rerank.URL != "http://reranker:8080/v1" || c.Rerank.Model != "jina-reranker-v2-base-multilingual" || c.Rerank.APIKey != "k" {
+		t.Errorf("overrides: %+v %v", c.Rerank, err)
+	}
+}
+
 func TestLoadInvalid(t *testing.T) {
 	for _, m := range []map[string]string{
+		{"KENFOLD_RERANK_URL": "reranker:8080"},
 		{"KENFOLD_CHAT_URL": "ollama:11434"},
 		{"KENFOLD_CHAT_URL": "http://x/v1", "KENFOLD_CHAT_REASONING": "maximum"},
 		{"KENFOLD_EXTRACT_POLICY": "yolo"},

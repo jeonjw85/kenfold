@@ -16,11 +16,16 @@ import (
 	"github.com/kenfold/kenfold/internal/apikey"
 	"github.com/kenfold/kenfold/internal/buildinfo"
 	"github.com/kenfold/kenfold/internal/chat"
+	"github.com/kenfold/kenfold/internal/coderef"
 	"github.com/kenfold/kenfold/internal/config"
 	"github.com/kenfold/kenfold/internal/embed"
 	"github.com/kenfold/kenfold/internal/extract"
 	"github.com/kenfold/kenfold/internal/httpserver"
 	"github.com/kenfold/kenfold/internal/mcpserver"
+	"github.com/kenfold/kenfold/internal/memory"
+	"github.com/kenfold/kenfold/internal/rerank"
+	"github.com/kenfold/kenfold/internal/restapi"
+	"github.com/kenfold/kenfold/internal/retrieve"
 	"github.com/kenfold/kenfold/internal/store"
 	"github.com/kenfold/kenfold/migrations"
 )
@@ -41,8 +46,9 @@ type runtime struct {
 	pool     *pgxpool.Pool
 	store    *store.Store
 	keys     *apikey.Store
-	embedder *embed.Client // nil when embeddings are disabled
-	chat     *chat.Client  // nil when no chat model is configured
+	embedder *embed.Client  // nil when embeddings are disabled
+	chat     *chat.Client   // nil when no chat model is configured
+	reranker *rerank.Client // nil when no reranker is configured
 }
 
 func newRuntime(ctx context.Context, cfg config.Config) (*runtime, error) {
@@ -60,6 +66,13 @@ func newRuntime(ctx context.Context, cfg config.Config) (*runtime, error) {
 			Dim:            store.EmbeddingDim,
 			SendDimensions: cfg.Embed.SendDimensions,
 		})
+		if err != nil {
+			pool.Close()
+			return nil, err
+		}
+	}
+	if cfg.Rerank.Enabled() {
+		rt.reranker, err = rerank.New(rerank.Config{BaseURL: cfg.Rerank.URL, Model: cfg.Rerank.Model, APIKey: cfg.Rerank.APIKey})
 		if err != nil {
 			pool.Close()
 			return nil, err
@@ -107,6 +120,14 @@ func (rt *runtime) embedderIface() store.Embedder {
 	return rt.embedder
 }
 
+// rerankerIface avoids a typed-nil *rerank.Client in an interface.
+func (rt *runtime) rerankerIface() retrieve.Reranker {
+	if rt.reranker == nil {
+		return nil
+	}
+	return rt.reranker
+}
+
 // httpHandler builds the full HTTP stack exactly as `serve` runs it. HTTP
 // callers are identified by API key, never by KENFOLD_AGENT.
 func httpHandler(cfg config.Config, rt *runtime, logger *slog.Logger) http.Handler {
@@ -114,10 +135,11 @@ func httpHandler(cfg config.Config, rt *runtime, logger *slog.Logger) http.Handl
 		Store:       rt.store,
 		Embedder:    rt.embedderIface(),
 		Classifier:  rt.classifier(cfg),
+		Reranker:    rt.rerankerIface(),
 		Logger:      logger,
 		MaxDistance: cfg.SearchMaxDistance,
 	}
-	opts := httpserver.Options{AllowedHosts: cfg.AllowedHosts}
+	opts := httpserver.Options{AllowedHosts: cfg.AllowedHosts, API: restapi.New(rt.store, logger)}
 	if cfg.Auth == config.AuthAPIKey {
 		opts.Verifier = rt.keys.TokenVerifier(logger)
 	}
@@ -164,6 +186,19 @@ func (c *cli) serve(ctx context.Context) error {
 	} else {
 		c.logger.Info("embeddings disabled (KENFOLD_EMBED_URL unset); using full-text search only")
 	}
+	if rt.reranker != nil {
+		c.logger.Info("reranker configured", "endpoint", rt.reranker.Endpoint(), "model", rt.reranker.Model())
+	}
+	// Record code references of memories written before Phase 3.
+	wg.Go(func() {
+		n, err := rt.store.BackfillRefs(bgCtx, []memory.Type{memory.TypeProject, memory.TypeCodebase, memory.TypeSemantic}, refTargets)
+		switch {
+		case err != nil && bgCtx.Err() == nil:
+			c.logger.Warn("code reference backfill failed", "err", err)
+		case n > 0:
+			c.logger.Info("code references recorded for existing memories", "memories", n)
+		}
+	})
 	if rt.chat != nil {
 		c.logger.Info("chat model configured", "endpoint", rt.chat.Endpoint(), "model", rt.chat.Model(),
 			"extract", c.cfg.Extract, "extract_policy", c.cfg.ExtractPolicy, "classify", c.cfg.Classify)
@@ -267,6 +302,7 @@ func (c *cli) serveStdio(ctx context.Context) error {
 		Logger:      c.logger,
 		Agent:       c.cfg.Agent,
 		Classifier:  rt.classifier(c.cfg),
+		Reranker:    rt.rerankerIface(),
 		MaxDistance: c.cfg.SearchMaxDistance,
 	})
 	err = s.Run(ctx, &mcp.StdioTransport{})
@@ -337,4 +373,13 @@ func (c *cli) migrate(ctx context.Context, args []string) error {
 		}
 	}
 	return nil
+}
+
+// refTargets extracts code references from memory content.
+func refTargets(content string) []store.RefTarget {
+	var out []store.RefTarget
+	for _, r := range coderef.Extract(content) {
+		out = append(out, store.RefTarget(r))
+	}
+	return out
 }

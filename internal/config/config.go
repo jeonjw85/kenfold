@@ -63,7 +63,24 @@ type Config struct {
 	// Classify uses the chat model to type memories stored without a type
 	// (default: on when Chat is configured).
 	Classify bool
+
+	// Rerank configures a cross-encoder reranker for search; disabled when
+	// Rerank.URL is empty.
+	Rerank Rerank
 }
+
+// Rerank configures a /rerank endpoint (llama-server, Jina, Cohere, Voyage).
+type Rerank struct {
+	URL    string // e.g. http://127.0.0.1:8080/v1 for llama-server
+	Model  string
+	APIKey string // never logged
+}
+
+// Enabled reports whether a reranker is configured.
+func (r Rerank) Enabled() bool { return r.URL != "" }
+
+// DefaultRerankModel is the reranker Kenfold's compose file runs.
+const DefaultRerankModel = "bge-reranker-v2-m3"
 
 // Chat configures an OpenAI-compatible chat completions endpoint.
 type Chat struct {
@@ -123,6 +140,11 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 			Reasoning: strings.ToLower(envOr(getenv, "KENFOLD_CHAT_REASONING", "none")),
 		},
 		ExtractPolicy: strings.ToLower(envOr(getenv, "KENFOLD_EXTRACT_POLICY", ExtractPropose)),
+		Rerank: Rerank{
+			URL:    strings.TrimSpace(getenv("KENFOLD_RERANK_URL")),
+			Model:  envOr(getenv, "KENFOLD_RERANK_MODEL", DefaultRerankModel),
+			APIKey: getenv("KENFOLD_RERANK_API_KEY"),
+		},
 	}
 
 	if v := getenv("KENFOLD_ALLOWED_HOSTS"); v != "" {
@@ -174,6 +196,13 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("KENFOLD_SEARCH_MAX_DISTANCE: %q must be a number in (0, 2]", v)
 		}
 		c.SearchMaxDistance = f
+	}
+
+	if c.Rerank.URL != "" {
+		u, err := url.Parse(c.Rerank.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return Config{}, fmt.Errorf("KENFOLD_RERANK_URL: %q is not an http(s) URL", c.Rerank.URL)
+		}
 	}
 
 	if c.Chat.URL != "" {

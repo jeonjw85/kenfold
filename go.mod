@@ -6,6 +6,7 @@ require (
 	github.com/google/jsonschema-go v0.4.3
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
+	github.com/odvcencio/gotreesitter v0.55.1
 	github.com/pressly/goose/v3 v3.28.0
 )
 

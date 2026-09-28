@@ -190,7 +190,7 @@ func formatContext(project string, c mcpserver.GetContextOutput) string {
 			if withDate {
 				fmt.Fprintf(&b, "- [%s, %s] %s\n", m.CreatedAt.UTC().Format("2006-01-02"), m.SourceAgent, oneLine(m.Content, n))
 			} else {
-				fmt.Fprintf(&b, "- %s [%s]\n", oneLine(m.Content, n), m.SourceAgent)
+				fmt.Fprintf(&b, "- %s [%s]%s\n", oneLine(m.Content, n), m.SourceAgent, staleNote(m))
 			}
 		}
 	}
@@ -206,6 +206,29 @@ func formatContext(project string, c mcpserver.GetContextOutput) string {
 		out = truncate(out, maxContextRunes-80) + "\n(Truncated; use the kenfold recall tool for more.)"
 	}
 	return out
+}
+
+// staleNote marks a memory whose referenced code changed or disappeared.
+func staleNote(m mcpserver.MemoryView) string {
+	if !m.Stale {
+		return ""
+	}
+	for _, r := range m.CodeRefs {
+		what := r.Path
+		if r.Symbol != "" {
+			what = strings.TrimSpace(r.Symbol + " in " + r.Path)
+			if r.Path == "" {
+				what = r.Symbol
+			}
+		}
+		switch {
+		case r.State == "missing":
+			return " (outdated? " + oneLine(what, 120) + " no longer exists)"
+		case r.State == "changed" && r.Symbol != "":
+			return " (outdated? " + oneLine(what, 120) + " changed since this was written)"
+		}
+	}
+	return " (outdated? the code it refers to changed)"
 }
 
 func stamp(t time.Time) string { return t.UTC().Format("2006-01-02 15:04 UTC") }
@@ -231,4 +254,11 @@ func firstLine(s string) string {
 		}
 	}
 	return ""
+}
+
+// DetectProject returns the project identity and branch of the git
+// repository containing dir (see detectProject); both are empty outside a
+// repository.
+func DetectProject(ctx context.Context, dir string) (project, branch string) {
+	return detectProject(ctx, dir)
 }

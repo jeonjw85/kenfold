@@ -14,10 +14,16 @@ BUILD_ENV   := VERSION=$(VERSION) COMMIT=$(COMMIT) DATE=$(DATE)
 # Runs the kenfold binary inside the running container (it has the database URL).
 KENFOLD_CLI := docker compose exec -T kenfold /usr/local/bin/kenfold
 
-.PHONY: build test test-integration lint fmt up up-embed up-extract down logs migrate key keys reindex review eval clean
+# tree-sitter grammars embedded in bin/kenfold, used to find the symbols
+# memories refer to (`kenfold refs sync` and the session hook). Plain
+# `go build` embeds all ~200 grammars (about 15 MB more).
+GRAMMARS  ?= go typescript tsx javascript python rust java kotlin ruby c_sharp php c cpp swift scala bash
+GO_TAGS   := grammar_subset $(addprefix grammar_subset_,$(GRAMMARS))
+
+.PHONY: build test test-integration lint fmt up up-embed up-extract down logs migrate key keys reindex review eval eval-search clean
 
 build: ## Build ./bin/kenfold
-	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/kenfold ./cmd/kenfold
+	CGO_ENABLED=0 go build -trimpath -tags "$(GO_TAGS)" -ldflags "$(LDFLAGS)" -o bin/kenfold ./cmd/kenfold
 
 test: ## Unit tests + stdio end-to-end test (no database needed)
 	go test ./...
@@ -47,25 +53,39 @@ up: ## Start Postgres + Kenfold with full-text search (builds the image)
 THREADS ?= 4
 derive = docker compose exec -T ollama sh -c 'printf "FROM %s\nPARAMETER num_thread %s\n%b" "$(1)" "$(THREADS)" "$(3)" > /tmp/Modelfile && ollama create $(2) -f /tmp/Modelfile'
 
-up-embed: ## Start Postgres + Ollama + Kenfold with hybrid search (first run downloads bge-m3, ~1.2 GB)
-	docker compose --profile embed up -d --wait postgres ollama
+# The reranker (llama.cpp, bge-reranker-v2-m3) raised recall@5 on the internal
+# eval set from 0.90 to 0.96 and adds 1–2 s per search on CPU. RERANK=0 leaves it out.
+RERANK ?= 1
+ifeq ($(RERANK),1)
+SEARCH_PROFILES := --profile embed --profile rerank
+SEARCH_SERVICES := ollama reranker
+SEARCH_ENV      := KENFOLD_RERANK_URL=http://reranker:8080/v1
+else
+SEARCH_PROFILES := --profile embed
+SEARCH_SERVICES := ollama
+SEARCH_ENV      :=
+endif
+EMBED_ENV := KENFOLD_EMBED_URL=http://ollama:11434/v1 KENFOLD_EMBED_MODEL=kenfold-embed KENFOLD_EMBED_NAME=$(EMBED_MODEL)
+
+up-embed: ## Start Postgres + Ollama (+ reranker) + Kenfold with hybrid search (first run downloads ~1.9 GB)
+	THREADS=$(THREADS) docker compose $(SEARCH_PROFILES) up -d --wait postgres $(SEARCH_SERVICES)
 	docker compose exec -T ollama ollama pull $(EMBED_MODEL)
 	$(call derive,$(EMBED_MODEL),kenfold-embed,)
-	$(BUILD_ENV) KENFOLD_EMBED_URL=http://ollama:11434/v1 KENFOLD_EMBED_MODEL=kenfold-embed KENFOLD_EMBED_NAME=$(EMBED_MODEL) \
-	  docker compose --profile embed up -d --build --wait
+	$(BUILD_ENV) THREADS=$(THREADS) $(EMBED_ENV) $(SEARCH_ENV) \
+	  docker compose $(SEARCH_PROFILES) up -d --build --wait
 
 up-extract: ## up-embed + a local chat model for memory extraction (first run downloads qwen3.5:4b, ~3.4 GB)
-	docker compose --profile embed up -d --wait postgres ollama
+	THREADS=$(THREADS) docker compose $(SEARCH_PROFILES) up -d --wait postgres $(SEARCH_SERVICES)
 	docker compose exec -T ollama ollama pull $(EMBED_MODEL)
 	docker compose exec -T ollama ollama pull $(CHAT_MODEL)
 	$(call derive,$(EMBED_MODEL),kenfold-embed,)
 	$(call derive,$(CHAT_MODEL),$(EXTRACT_MODEL),PARAMETER num_ctx 8192\nPARAMETER temperature 0\n)
-	$(BUILD_ENV) KENFOLD_EMBED_URL=http://ollama:11434/v1 KENFOLD_EMBED_MODEL=kenfold-embed KENFOLD_EMBED_NAME=$(EMBED_MODEL) \
+	$(BUILD_ENV) THREADS=$(THREADS) $(EMBED_ENV) $(SEARCH_ENV) \
 	  KENFOLD_CHAT_URL=http://ollama:11434/v1 KENFOLD_CHAT_MODEL=$(EXTRACT_MODEL) \
-	  docker compose --profile embed up -d --build --wait
+	  docker compose $(SEARCH_PROFILES) up -d --build --wait
 
-down: ## Stop the stack, including Ollama (data volumes are kept)
-	docker compose --profile embed down
+down: ## Stop the stack, including the optional model services (data volumes are kept)
+	docker compose --profile embed --profile rerank down
 
 logs:
 	docker compose logs -f kenfold
@@ -89,6 +109,14 @@ review: ## Review proposed memories (extracted memories, preferences) interactiv
 eval: ## Measure extraction and classification on the internal eval set (needs `make up-extract`)
 	KENFOLD_EVAL_CHAT_URL=http://127.0.0.1:11435/v1 KENFOLD_EVAL_CHAT_MODEL=$(EXTRACT_MODEL) \
 	  go test -count=1 -run TestEvalModel -v -timeout 30m ./internal/extract/
+
+eval-search: ## Measure retrieval (recall@5 per pipeline stage) on the internal corpus (needs `make up-embed`)
+	@docker compose exec -T postgres psql -U kenfold -d kenfold -tAc \
+	  "SELECT 1 FROM pg_database WHERE datname = '$(TEST_DB)'" | grep -q 1 || \
+	  docker compose exec -T postgres psql -U kenfold -d kenfold -c "CREATE DATABASE $(TEST_DB)"
+	KENFOLD_TEST_DATABASE_URL="$(TEST_DB_URL)" KENFOLD_EVAL_EMBED_URL=http://127.0.0.1:11435/v1 KENFOLD_EVAL_EMBED_MODEL=kenfold-embed \
+	  $(if $(filter 1,$(RERANK)),KENFOLD_EVAL_RERANK_URL=http://127.0.0.1:11436/v1) \
+	  go test -count=1 -run TestEvalRetrieval -v -timeout 30m ./internal/retrieve/
 
 clean:
 	rm -rf bin

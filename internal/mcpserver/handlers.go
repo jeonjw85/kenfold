@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -13,7 +14,9 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kenfold/kenfold/internal/apikey"
+	"github.com/kenfold/kenfold/internal/coderef"
 	"github.com/kenfold/kenfold/internal/memory"
+	"github.com/kenfold/kenfold/internal/retrieve"
 	"github.com/kenfold/kenfold/internal/secrets"
 	"github.com/kenfold/kenfold/internal/store"
 )
@@ -46,12 +49,12 @@ const (
 
 // handlers holds the dependencies shared by the tool handlers.
 type handlers struct {
-	store       *store.Store
-	embedder    store.Embedder
-	classifier  Classifier
-	log         *slog.Logger
-	agent       string
-	maxDistance float64
+	store      *store.Store
+	embedder   store.Embedder
+	classifier Classifier
+	retriever  *retrieve.Retriever
+	log        *slog.Logger
+	agent      string
 }
 
 func newHandlers(d Deps) *handlers {
@@ -59,7 +62,11 @@ func newHandlers(d Deps) *handlers {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &handlers{store: d.Store, embedder: d.Embedder, classifier: d.Classifier, log: log, agent: d.Agent, maxDistance: d.MaxDistance}
+	return &handlers{
+		store: d.Store, embedder: d.Embedder, classifier: d.Classifier, log: log, agent: d.Agent,
+		retriever: &retrieve.Retriever{Store: d.Store, Embedder: d.Embedder, Reranker: d.Reranker, Logger: log,
+			Options: retrieve.Options{MaxDistance: d.MaxDistance}},
+	}
 }
 
 // classifyTimeout bounds type classification on remember. A small local
@@ -191,6 +198,9 @@ func (h *handlers) remember(ctx context.Context, req *mcp.CallToolRequest, in Re
 	if vec := h.embed(ctx, "remember", content); vec != nil {
 		p.Embedding, p.EmbeddingModel = vec, h.embedder.Model()
 	}
+	for _, r := range coderef.For(typ, scope, content) {
+		p.Refs = append(p.Refs, store.RefTarget(r))
+	}
 
 	m, err := h.store.Create(ctx, p)
 	switch {
@@ -226,6 +236,7 @@ func (h *handlers) similar(ctx context.Context, m store.Memory, vec []float32, m
 		v.Score = r.Score
 		out = append(out, v)
 	}
+	h.attachRefs(ctx, out)
 	return out
 }
 
@@ -289,6 +300,7 @@ func (h *handlers) recall(ctx context.Context, _ *mcp.CallToolRequest, in Recall
 		v.Score = r.Score
 		out.Memories = append(out.Memories, v)
 	}
+	h.attachRefs(ctx, out.Memories)
 	return nil, out, nil
 }
 
@@ -433,8 +445,24 @@ func (h *handlers) getContext(ctx context.Context, _ *mcp.CallToolRequest, in Ge
 		if err != nil {
 			return nil, GetContextOutput{}, h.internal(ctx, "get_context", err)
 		}
-		for _, m := range proj {
-			if v, ok := b.take(toMemoryView(m)); ok {
+		views := make([]MemoryView, len(proj))
+		for i, m := range proj {
+			views[i] = toMemoryView(m)
+		}
+		// Rules whose code is gone or changed come last, so they are the
+		// first to be left out when the budget is tight.
+		h.attachRefs(ctx, views)
+		slices.SortStableFunc(views, func(a, b MemoryView) int {
+			switch {
+			case a.Stale == b.Stale:
+				return 0
+			case b.Stale:
+				return -1
+			}
+			return 1
+		})
+		for _, v := range views {
+			if v, ok := b.take(v); ok {
 				out.Project = append(out.Project, v)
 			}
 		}
@@ -453,6 +481,7 @@ func (h *handlers) getContext(ctx context.Context, _ *mcp.CallToolRequest, in Ge
 				out.Relevant = append(out.Relevant, v)
 			}
 		}
+		h.attachRefs(ctx, out.Relevant)
 	}
 	out.Truncated = b.truncated
 	return nil, out, nil
@@ -494,14 +523,42 @@ func estimateTokens(v MemoryView) int {
 
 // ---- shared helpers ----
 
-// search runs a hybrid search, embedding the query when an embedder is set.
-func (h *handlers) search(ctx context.Context, op, query, scope string, types []memory.Type, limit int) ([]store.Scored, error) {
-	p := store.SearchParams{Query: query, Scope: scope, Types: types, Limit: limit, MaxDistance: h.maxDistance}
-	if vec := h.embed(ctx, op, query); vec != nil {
-		p.Vector, p.Model = vec, h.embedder.Model()
-	}
-	return h.store.Search(ctx, p)
+// search ranks memories for query (see package retrieve).
+func (h *handlers) search(ctx context.Context, _, query, scope string, types []memory.Type, limit int) ([]store.Scored, error) {
+	return h.retriever.Search(ctx, retrieve.Query{Text: query, Scope: scope, Types: types, Limit: limit})
 }
+
+// attachRefs fills in the code references of views (best-effort: on failure
+// the views are returned without them).
+func (h *handlers) attachRefs(ctx context.Context, views []MemoryView) {
+	if len(views) == 0 {
+		return
+	}
+	ids := make([]string, len(views))
+	for i, v := range views {
+		ids[i] = v.ID
+	}
+	refs, err := h.store.Refs(ctx, ids)
+	if err != nil {
+		h.log.WarnContext(ctx, "code references lookup failed", "err", err)
+		return
+	}
+	for i := range views {
+		for _, r := range refs[views[i].ID] {
+			cv := CodeRefView{Path: r.Path, Symbol: r.Symbol, State: r.State}
+			if cv.Path == "" && r.ResolvedPath != nil {
+				cv.Path = *r.ResolvedPath
+			}
+			if r.CheckedCommit != nil {
+				cv.CheckedCommit = shortCommit(*r.CheckedCommit)
+			}
+			views[i].CodeRefs = append(views[i].CodeRefs, cv)
+			views[i].Stale = views[i].Stale || r.Stale()
+		}
+	}
+}
+
+func shortCommit(c string) string { return c[:min(len(c), 12)] }
 
 // embed returns the embedding of text, or nil when embeddings are disabled or
 // the provider fails. Failures are logged, never returned: Kenfold degrades to

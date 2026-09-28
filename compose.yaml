@@ -2,7 +2,8 @@
 # credentials are for local use only.
 #
 #   make up          Postgres + Kenfold (full-text search)
-#   make up-embed    + Ollama with bge-m3 for hybrid (full-text + vector) search
+#   make up-embed    + Ollama with bge-m3 for hybrid (full-text + vector) search,
+#                    and a llama.cpp reranker (bge-reranker-v2-m3; RERANK=0 skips it)
 #   make up-extract  + a local chat model for memory extraction and classification
 name: kenfold
 
@@ -52,6 +53,10 @@ services:
       KENFOLD_CHAT_MODEL: ${KENFOLD_CHAT_MODEL:-qwen3.5:4b}
       KENFOLD_CHAT_API_KEY: ${KENFOLD_CHAT_API_KEY:-}
       KENFOLD_EXTRACT_POLICY: ${KENFOLD_EXTRACT_POLICY:-propose}
+      # Reranking is off unless KENFOLD_RERANK_URL is set (`make up-embed` points it at the reranker service).
+      KENFOLD_RERANK_URL: ${KENFOLD_RERANK_URL:-}
+      KENFOLD_RERANK_MODEL: ${KENFOLD_RERANK_MODEL:-bge-reranker-v2-m3}
+      KENFOLD_RERANK_API_KEY: ${KENFOLD_RERANK_API_KEY:-}
       KENFOLD_LOG_LEVEL: ${KENFOLD_LOG_LEVEL:-info}
     ports:
       - "127.0.0.1:7077:7077"
@@ -83,6 +88,47 @@ services:
       start_period: 5s
     restart: unless-stopped
 
+  # Optional cross-encoder reranker (Ollama has no rerank API). Started only with
+  # the "rerank" profile. The first start downloads the model (~640 MB).
+  reranker:
+    image: ghcr.io/ggml-org/llama.cpp:server-v0.5.0
+    profiles: [rerank]
+    command:
+      - -hf
+      - ${KENFOLD_RERANK_HF:-gpustack/bge-reranker-v2-m3-GGUF:Q8_0}
+      - --alias
+      - bge-reranker-v2-m3
+      - --reranking
+      - --embedding
+      - --pooling
+      - rank
+      # One thread per performance core (see THREADS in the Makefile).
+      - --threads
+      - ${THREADS:-4}
+      - --ctx-size
+      - "8192"
+      - --batch-size
+      - "2048"
+      - --ubatch-size
+      - "2048"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+    ports:
+      - "127.0.0.1:11436:8080"
+    volumes:
+      - reranker:/root/.cache
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 5s
+      # The first start downloads the model.
+      retries: 360
+      start_period: 10s
+    restart: unless-stopped
+
 volumes:
   pgdata:
   ollama:
+  reranker:

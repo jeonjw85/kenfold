@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/kenfold/kenfold/internal/chat"
+	"github.com/kenfold/kenfold/internal/coderef"
 	"github.com/kenfold/kenfold/internal/memory"
 	"github.com/kenfold/kenfold/internal/store"
 )
@@ -180,10 +181,14 @@ func (w *Worker) store(ctx context.Context, src store.Memory, c Candidate) (stor
 	if src.SourceSession != nil {
 		session = *src.SourceSession
 	}
+	var refs []store.RefTarget
+	for _, r := range coderef.For(c.Type, scope, c.Content) {
+		refs = append(refs, store.RefTarget(r))
+	}
 	m, err := w.Store.Create(ctx, store.CreateParams{
 		Type: c.Type, Scope: scope, Content: c.Content, Attrs: attrs,
 		SourceAgent: Agent, SourceSession: session, Trust: memory.TrustAgent,
-		Confidence: c.Confidence, Status: status, Embedding: vec, EmbeddingModel: model,
+		Confidence: c.Confidence, Status: status, Embedding: vec, EmbeddingModel: model, Refs: refs,
 	})
 	if err != nil {
 		return store.Memory{}, false, err

@@ -16,6 +16,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kenfold/kenfold/internal/memory"
+	"github.com/kenfold/kenfold/internal/retrieve"
 	"github.com/kenfold/kenfold/internal/store"
 )
 
@@ -37,17 +38,27 @@ const Instructions = `Kenfold is memory shared by all of the user's AI agents.
 
 // MemoryView is the representation of a memory returned to agents.
 type MemoryView struct {
-	ID          string       `json:"id"`
-	Type        memory.Type  `json:"type"`
-	Scope       string       `json:"scope" jsonschema:"'user', 'project:<id>' or 'repo:<id>'"`
-	Content     string       `json:"content"`
-	SourceAgent string       `json:"source_agent" jsonschema:"agent that wrote the memory, e.g. claude-code, codex"`
-	Trust       memory.Trust `json:"trust"`
-	CreatedAt   time.Time    `json:"created_at"`
-	ExpiresAt   *time.Time   `json:"expires_at,omitempty" jsonschema:"when a temporary memory or handoff expires"`
-	NextSteps   []string     `json:"next_steps,omitempty" jsonschema:"handoffs only: concrete next actions"`
-	ResumedBy   string       `json:"resumed_by,omitempty" jsonschema:"handoffs only: the agent that first resumed it"`
-	Score       float64      `json:"score,omitempty" jsonschema:"relevance to the query in (0, 1]; higher is better"`
+	ID          string        `json:"id"`
+	Type        memory.Type   `json:"type"`
+	Scope       string        `json:"scope" jsonschema:"'user', 'project:<id>' or 'repo:<id>'"`
+	Content     string        `json:"content"`
+	SourceAgent string        `json:"source_agent" jsonschema:"agent that wrote the memory, e.g. claude-code, codex"`
+	Trust       memory.Trust  `json:"trust"`
+	CreatedAt   time.Time     `json:"created_at"`
+	ExpiresAt   *time.Time    `json:"expires_at,omitempty" jsonschema:"when a temporary memory or handoff expires"`
+	NextSteps   []string      `json:"next_steps,omitempty" jsonschema:"handoffs only: concrete next actions"`
+	ResumedBy   string        `json:"resumed_by,omitempty" jsonschema:"handoffs only: the agent that first resumed it"`
+	Score       float64       `json:"score,omitempty" jsonschema:"relevance to the query in (0, 1]; higher is better"`
+	CodeRefs    []CodeRefView `json:"code_refs,omitempty" jsonschema:"files and symbols this memory refers to, with their state at the last checked commit"`
+	Stale       bool          `json:"stale,omitempty" jsonschema:"true if code this memory refers to was removed, or a symbol it names changed, since it was written; verify before relying on it"`
+}
+
+// CodeRefView is a file or symbol a memory refers to.
+type CodeRefView struct {
+	Path          string `json:"path,omitempty" jsonschema:"repository-relative path (where the symbol was found, for symbols mentioned without a file)"`
+	Symbol        string `json:"symbol,omitempty"`
+	State         string `json:"state" jsonschema:"pending (not verified yet), current, changed, or missing"`
+	CheckedCommit string `json:"checked_commit,omitempty" jsonschema:"commit the state was checked at"`
 }
 
 // ---- get_context ----
@@ -150,6 +161,8 @@ type Deps struct {
 	// Classifier, if set, picks the type of memories stored without one.
 	// Without it (or when it fails) the type defaults by scope.
 	Classifier Classifier
+	// Reranker, if set, reranks search results with a cross-encoder.
+	Reranker retrieve.Reranker
 }
 
 // Classifier picks a memory type for content (see extract.Classify).

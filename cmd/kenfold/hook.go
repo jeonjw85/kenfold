@@ -28,6 +28,7 @@ func hookCmd(ctx context.Context, args []string, getenv func(string) string, std
 	keyEnv := fs.String("key-env", "KENFOLD_API_KEY", "environment variable holding the agent's API key")
 	agent := fs.String("agent", "", "client name reported to the server (only used when the server runs without API keys)")
 	noCapture := fs.Bool("no-capture", false, "load memory at session start, but do not record sessions")
+	noRefs := fs.Bool("no-refs", false, "do not check the code that memories refer to at session start")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -58,6 +59,7 @@ func hookCmd(ctx context.Context, args []string, getenv func(string) string, std
 		ClientName: *agent,
 		StateDir:   stateDir,
 		Capture:    !*noCapture,
+		NoRefs:     *noRefs,
 		Version:    buildinfo.Version,
 		Stderr:     stderr,
 	})

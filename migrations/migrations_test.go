@@ -154,12 +154,39 @@ func TestMigrationsIntegration(t *testing.T) {
 		t.Errorf("extraction rows after cascade = %d, %v", jobs, err)
 	}
 
+	// 00005: code references need a project scope and a target; anchors are all or nothing; they cascade.
+	var code string
+	if err := db.QueryRowContext(ctx, `INSERT INTO memory (type, scope, content, source_agent) VALUES ('codebase', 'project:ex/r', 'x in a.go', 't') RETURNING id`).Scan(&code); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec(`INSERT INTO memory_ref (memory_id, scope, path) VALUES ($1, 'project:ex/r', 'a.go')`, code); err != nil {
+		t.Fatalf("insert ref: %v", err)
+	}
+	for name, q := range map[string]string{
+		"user scope":     `INSERT INTO memory_ref (memory_id, scope, path) VALUES ($1, 'user', 'b.go')`,
+		"no target":      `INSERT INTO memory_ref (memory_id, scope) VALUES ($1, 'project:ex/r')`,
+		"bad state":      `INSERT INTO memory_ref (memory_id, scope, path, state) VALUES ($1, 'project:ex/r', 'c.go', 'stale')`,
+		"partial anchor": `INSERT INTO memory_ref (memory_id, scope, path, anchor_hash) VALUES ($1, 'project:ex/r', 'd.go', 'h')`,
+		"duplicate":      `INSERT INTO memory_ref (memory_id, scope, path) VALUES ($1, 'project:ex/r', 'a.go')`,
+	} {
+		if err := exec(q, code); err == nil {
+			t.Errorf("memory_ref %s accepted", name)
+		}
+	}
+	if err := exec(`DELETE FROM memory WHERE id = $1`, code); err != nil {
+		t.Fatal(err)
+	}
+	var refs int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM memory_ref`).Scan(&refs); err != nil || refs != 0 {
+		t.Errorf("memory_ref rows after cascade = %d, %v", refs, err)
+	}
+
 	// Down must fully revert.
 	if _, err := p.DownTo(ctx, 0); err != nil {
 		t.Fatalf("down: %v", err)
 	}
 	var tables int
-	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pg_tables WHERE tablename IN ('memory', 'memory_edge', 'api_key', 'extraction')`).Scan(&tables); err != nil || tables != 0 {
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pg_tables WHERE tablename IN ('memory', 'memory_edge', 'api_key', 'extraction', 'memory_ref')`).Scan(&tables); err != nil || tables != 0 {
 		t.Errorf("tables after down = %d, %v; want 0", tables, err)
 	}
 	// Leave the schema migrated for manual inspection.

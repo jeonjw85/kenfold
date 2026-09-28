@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kenfold/kenfold/internal/coderef"
 	"github.com/kenfold/kenfold/internal/mcpserver"
 	"github.com/kenfold/kenfold/internal/secrets"
 )
@@ -75,6 +76,8 @@ type Options struct {
 	ContextTimeout time.Duration // get_context at SessionStart (default 4s)
 	SendTimeout    time.Duration // remember at SessionEnd (default 1s: SessionEnd budgets are short)
 	FlushBudget    time.Duration // sending spooled summaries at SessionStart (default 3s)
+	RefsBudget     time.Duration // code reference sync at SessionStart (default 2s)
+	NoRefs         bool          // skip code reference sync
 }
 
 func (o *Options) defaults() {
@@ -98,6 +101,9 @@ func (o *Options) defaults() {
 	}
 	if o.FlushBudget <= 0 {
 		o.FlushBudget = 3 * time.Second
+	}
+	if o.RefsBudget <= 0 {
+		o.RefsBudget = 2 * time.Second
 	}
 }
 
@@ -174,6 +180,12 @@ func (r *runner) sessionStart(ctx context.Context, stdout io.Writer) error {
 	r.flush(flushCtx)
 	cancel()
 
+	// Tell the server whether code that memories refer to changed, so the
+	// context below can flag stale memories.
+	if project != "" && !r.o.NoRefs {
+		r.syncRefs(ctx, project)
+	}
+
 	cctx, cancel := context.WithTimeout(ctx, r.o.ContextTimeout)
 	defer cancel()
 	args := map[string]any{"budget_tokens": contextBudget}
@@ -190,6 +202,28 @@ func (r *runner) sessionStart(ctx context.Context, stdout io.Writer) error {
 		return nil
 	}
 	return writeJSON(stdout, hookOutput{HookSpecificOutput: &specific{HookEventName: "SessionStart", AdditionalContext: text}})
+}
+
+// syncRefs checks the project's code references against the repository
+// (see coderef.Sync) within RefsBudget. Expected conditions (no commits yet,
+// an older server without the API, the server down, the budget spent) are
+// silent; get_context reports an unreachable server.
+func (r *runner) syncRefs(ctx context.Context, project string) {
+	base, err := coderef.APIBase(r.o.URL)
+	if err != nil {
+		return
+	}
+	sctx, cancel := context.WithTimeout(ctx, r.o.RefsBudget)
+	defer cancel()
+	_, err = coderef.Sync(sctx, coderef.SyncOptions{APIBase: base, APIKey: r.o.APIKey, Dir: r.in.Cwd, Project: project, HTTPClient: r.o.HTTPClient})
+	var se *coderef.StatusError
+	switch {
+	case err == nil, errors.Is(err, coderef.ErrNoCommits), sctx.Err() != nil:
+	case errors.As(err, &se) && (se.Code == http.StatusNotFound || se.Code == http.StatusMethodNotAllowed):
+	case !errors.As(err, &se) && transient(err):
+	default:
+		r.warn("code reference sync: %v", err)
+	}
 }
 
 // ---- capture ----

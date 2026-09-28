@@ -17,6 +17,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/kenfold/kenfold/internal/coderef"
 	"github.com/kenfold/kenfold/internal/mcpserver"
 )
 
@@ -30,6 +31,8 @@ type fakeServer struct {
 	remembers   []rememberCall
 	auth        []string
 	srv         *httptest.Server
+	refTargets  []coderef.Target
+	refReports  []coderef.CheckReport
 }
 
 type rememberCall struct {
@@ -62,7 +65,22 @@ func newFakeServer(t *testing.T) *fakeServer {
 		f.mu.Lock()
 		f.auth = append(f.auth, r.Header.Get("Authorization"))
 		f.mu.Unlock()
-		h.ServeHTTP(w, r)
+		switch r.URL.Path {
+		case "/api/v1/refs":
+			f.mu.Lock()
+			list := coderef.TargetList{Scope: "project:" + r.URL.Query().Get("project"), Targets: f.refTargets}
+			f.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(list)
+		case "/api/v1/refs/check":
+			var rep coderef.CheckReport
+			_ = json.NewDecoder(r.Body).Decode(&rep)
+			f.mu.Lock()
+			f.refReports = append(f.refReports, rep)
+			f.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(coderef.CheckSummary{Updated: len(rep.Results)})
+		default:
+			h.ServeHTTP(w, r)
+		}
 	}))
 	t.Cleanup(f.srv.Close)
 	return f
@@ -413,5 +431,78 @@ func TestDetectProject(t *testing.T) {
 	}
 	if p, _ := detectProject(ctx, ""); p != "" {
 		t.Error("empty cwd")
+	}
+}
+
+func TestSessionStartSyncsCodeRefs(t *testing.T) {
+	f := newFakeServer(t)
+	f.refTargets = []coderef.Target{{Path: "internal/auth/jwt.go"}, {Path: "internal/auth/jwt.go", Symbol: "ParseToken"}, {Path: "gone.go"}}
+	f.ctxOut = mcpserver.GetContextOutput{Project: []mcpserver.MemoryView{
+		{Content: "ParseToken maps expiry to 401.", SourceAgent: "codex", Stale: true,
+			CodeRefs: []mcpserver.CodeRefView{{Path: "internal/auth/jwt.go", Symbol: "ParseToken", State: "changed"}}},
+		{Content: "Dedupe lives in gone.go.", SourceAgent: "codex", Stale: true, CodeRefs: []mcpserver.CodeRefView{{Path: "gone.go", State: "missing"}}},
+		{Content: "We use pgx v5.", SourceAgent: "claude-code"},
+	}}
+	repo := gitRepo(t, "git@github.com:org/api.git")
+	for _, args := range [][]string{{"config", "user.email", "t@example.com"}, {"config", "user.name", "t"}, {"config", "commit.gpgsign", "false"}} {
+		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "internal/auth"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "internal/auth/jwt.go"), []byte("package auth\n\nfunc ParseToken() error { return nil }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-q", "-m", "init"}} {
+		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	h := newHarness(t, f.srv.URL+"/mcp")
+	var stderr bytes.Buffer
+	h.opts.Stderr = &stderr
+	out, err := h.run(map[string]any{"hook_event_name": "SessionStart", "session_id": "s", "cwd": repo, "source": "startup"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.refReports) != 1 {
+		t.Fatalf("check reports = %d (stderr %q)", len(f.refReports), stderr.String())
+	}
+	rep := f.refReports[0]
+	found := map[string]bool{}
+	for _, r := range rep.Results {
+		found[r.Path+"#"+r.Symbol] = r.Found
+	}
+	if rep.Project != "github.com/org/api" || len(rep.Commit) != 40 || !found["internal/auth/jwt.go#"] || !found["internal/auth/jwt.go#ParseToken"] || found["gone.go#"] || len(rep.Results) != 3 {
+		t.Errorf("report = %+v", rep)
+	}
+	for _, want := range []string{"ParseToken maps expiry to 401. [codex] (outdated? ParseToken in internal/auth/jwt.go changed since this was written)",
+		"Dedupe lives in gone.go. [codex] (outdated? gone.go no longer exists)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("context lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "pgx v5. [claude-code] (") {
+		t.Errorf("a current memory is flagged:\n%s", out)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+
+	// NoRefs skips the sync; an old server without the API stays quiet.
+	h.opts.NoRefs = true
+	if _, err := h.run(map[string]any{"hook_event_name": "SessionStart", "session_id": "s2", "cwd": repo}); err != nil || len(f.refReports) != 1 {
+		t.Errorf("NoRefs: reports %d, %v", len(f.refReports), err)
+	}
+	old := httptest.NewServer(http.NotFoundHandler())
+	defer old.Close()
+	h2 := newHarness(t, old.URL+"/mcp")
+	stderr.Reset()
+	h2.opts.Stderr = &stderr
+	_, _ = h2.run(map[string]any{"hook_event_name": "SessionStart", "session_id": "s3", "cwd": repo})
+	if strings.Contains(stderr.String(), "code reference") {
+		t.Errorf("404 from an old server was reported: %q", stderr.String())
 	}
 }

@@ -5,6 +5,7 @@
 //	kenfold migrate [cmd]    database migrations: up (default) | down | status
 //	kenfold key ...          manage API keys (one per agent)
 //	kenfold memory ...       review memories (list, approve proposed ones, forget)
+//	kenfold refs ...         check code referenced by memories (sync in a repository, status)
 //	kenfold reindex          embed memories that have no embedding for the configured model
 //	kenfold version          print version
 package main
@@ -35,7 +36,7 @@ Usage:
   kenfold key list [--all]             list API keys (--all includes revoked keys)
   kenfold key revoke <id|prefix>       revoke an API key
 
-  kenfold memory list [flags]          list memories (--status, --type, --scope, --limit)
+  kenfold memory list [flags]          list memories (--status, --type, --scope, --stale, --limit)
   kenfold memory review [--scope S]    go through proposed memories: approve, reject, or replace
   kenfold memory approve <id>... [--replaces ID]
                                        approve proposed memories (optionally replacing an active one)
@@ -47,10 +48,14 @@ Usage:
   kenfold extract status               progress of memory extraction from session summaries
   kenfold extract run [--limit N]      extract memories now (needs KENFOLD_CHAT_URL)
 
+  kenfold refs sync [--dir D] [--key-file F] [--quiet]
+                                       check the code memories refer to against the repository's HEAD
+  kenfold refs status [--scope S]      code reference states and memories that may be outdated
+
   kenfold reindex                      embed memories missing an embedding for the configured model
   kenfold scan [--redact]              find (and remove) secrets stored before the secret filter
 
-  kenfold hook [--key-file F] [--no-capture]
+  kenfold hook [--key-file F] [--no-capture] [--no-refs]
                                        lifecycle hook for Claude Code and Codex (reads the event on stdin)
   kenfold hook config <claude-code|codex> [--key-file F]
                                        print the hooks configuration for a client
@@ -70,6 +75,10 @@ Environment:
   KENFOLD_EMBED_API_KEY        API key for the embeddings provider
   KENFOLD_EMBED_DIMENSIONS     send dimensions=1024 to the provider (default false)
   KENFOLD_SEARCH_MAX_DISTANCE  cosine distance cutoff for vector matches (default 0.55)
+  KENFOLD_RERANK_URL           rerank API base URL (llama-server, Jina, Cohere, Voyage), e.g. http://127.0.0.1:8080/v1
+                               (unset: no reranking)
+  KENFOLD_RERANK_MODEL         reranker model             (default ` + config.DefaultRerankModel + `)
+  KENFOLD_RERANK_API_KEY       API key for the rerank provider
   KENFOLD_CHAT_URL             OpenAI-compatible chat base URL for extraction and classification
                                (unset: no model-based extraction)
   KENFOLD_CHAT_MODEL           chat model                 (default ` + config.DefaultChatModel + `)
@@ -80,7 +89,7 @@ Environment:
   KENFOLD_CLASSIFY             classify memories stored without a type (default: on with a chat model)
   KENFOLD_LOG_LEVEL            debug|info|warn|error      (default info)
 
-Hook environment:
+Hook and refs sync environment:
   KENFOLD_URL                  MCP endpoint               (default http://127.0.0.1:7077/mcp)
   KENFOLD_API_KEY              the agent's API key, unless --key-file or --key-env is given
   KENFOLD_STATE_DIR            local session logs and spool (default ~/.local/state/kenfold)
@@ -132,6 +141,11 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdin i
 	case "hook":
 		// Runs inside Claude Code / Codex: independent of server configuration.
 		return hookCmd(ctx, rest, getenv, stdin, stdout, stderr)
+	case "refs":
+		if len(rest) > 0 && rest[0] == "sync" {
+			// Runs in the repository, talks to the server's API: no database.
+			return refsSync(ctx, rest[1:], getenv, stdout, stderr)
+		}
 	}
 
 	cfg, err := config.LoadFrom(getenv)
@@ -166,6 +180,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdin i
 		return c.memory(ctx, rest)
 	case "extract":
 		return c.extract(ctx, rest)
+	case "refs":
+		return c.refs(ctx, rest)
 	case "reindex":
 		if len(rest) > 0 {
 			return usageErr("reindex takes no arguments")

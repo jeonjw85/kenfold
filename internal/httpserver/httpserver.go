@@ -1,5 +1,5 @@
-// Package httpserver wires Kenfold's HTTP surface: health probes and the MCP
-// Streamable HTTP endpoint.
+// Package httpserver wires Kenfold's HTTP surface: health probes, the MCP
+// Streamable HTTP endpoint, and the REST API.
 package httpserver
 
 import (
@@ -27,10 +27,16 @@ type Options struct {
 	// AllowedHosts is the Host header allowlist for /mcp; empty rejects every
 	// MCP request.
 	AllowedHosts []string
-	// Verifier authenticates bearer tokens on /mcp. Nil disables authentication,
-	// which is only acceptable on a loopback-only development setup.
+	// Verifier authenticates bearer tokens on /mcp and the API. Nil disables
+	// authentication, which is only acceptable on a loopback-only development
+	// setup.
 	Verifier auth.TokenVerifier
+	// API, if set, is served under APIPrefix with the same protections as /mcp.
+	API http.Handler
 }
+
+// APIPrefix is where Options.API is mounted.
+const APIPrefix = "/api/"
 
 // New returns the root handler.
 func New(mcpServer *mcp.Server, db Pinger, logger *slog.Logger, opts Options) http.Handler {
@@ -64,20 +70,26 @@ func New(mcpServer *mcp.Server, db Pinger, logger *slog.Logger, opts Options) ht
 			PropagateRequestCancellation: true,
 		},
 	)
-	if opts.Verifier != nil {
-		// API keys do not expire (they are revoked), hence AllowMissingExpiration.
-		// The verified TokenInfo reaches tool handlers as req.Extra.TokenInfo.
-		mcpHandler = auth.RequireBearerToken(opts.Verifier, &auth.RequireBearerTokenOptions{
-			AllowMissingExpiration: true,
-		})(mcpHandler)
-	}
 	// Layered defenses, outermost first:
 	//   - Host allowlist: blocks DNS rebinding. The SDK's built-in check only
 	//     covers connections arriving on a loopback address, which is not the
 	//     case behind Docker port publishing, so we enforce it ourselves.
 	//   - Cross-origin protection: blocks CSRF-style cross-site POSTs.
 	//   - Bearer token (when enabled): identifies the calling agent.
-	mux.Handle(MCPPath, requireHost(opts.AllowedHosts, http.NewCrossOriginProtection().Handler(mcpHandler)))
+	protect := func(h http.Handler) http.Handler {
+		if opts.Verifier != nil {
+			// API keys do not expire (they are revoked), hence AllowMissingExpiration.
+			// The verified TokenInfo reaches tool handlers as req.Extra.TokenInfo.
+			h = auth.RequireBearerToken(opts.Verifier, &auth.RequireBearerTokenOptions{
+				AllowMissingExpiration: true,
+			})(h)
+		}
+		return requireHost(opts.AllowedHosts, http.NewCrossOriginProtection().Handler(h))
+	}
+	mux.Handle(MCPPath, protect(mcpHandler))
+	if opts.API != nil {
+		mux.Handle(APIPrefix, protect(opts.API))
+	}
 
 	return mux
 }

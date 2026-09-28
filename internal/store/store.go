@@ -90,6 +90,9 @@ type CreateParams struct {
 	// Embedding is optional; when set, EmbeddingModel must name the model.
 	Embedding      []float32
 	EmbeddingModel string
+	// Refs are the files and symbols the memory mentions (see package
+	// coderef); stored only for project scopes.
+	Refs []RefTarget
 }
 
 // Create inserts a new memory.
@@ -130,14 +133,17 @@ func (s *Store) Create(ctx context.Context, p CreateParams) (Memory, error) {
 				}
 			}
 		}
-		return scan(tx.QueryRow(ctx, `
+		if err := scan(tx.QueryRow(ctx, `
 			INSERT INTO memory
 			  (type, scope, content, attrs, source_agent, source_session, trust, confidence,
 			   status, supersedes, expires_at, embedding, embedding_model)
 			VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, $8, $9, $10, $11, $12::text::vector, $13)
 			RETURNING `+columns,
 			p.Type, p.Scope, p.Content, attrs, p.SourceAgent, p.SourceSession, p.Trust, p.Confidence,
-			p.Status, p.Supersedes, p.ExpiresAt, vec, model), &m)
+			p.Status, p.Supersedes, p.ExpiresAt, vec, model), &m); err != nil {
+			return err
+		}
+		return addRefs(ctx, tx, m.ID, m.Scope, p.Refs)
 	})
 	if err != nil {
 		return Memory{}, err
@@ -380,6 +386,8 @@ type ListParams struct {
 	Types    []memory.Type
 	Statuses []memory.Status
 	Limit    int
+	// Stale keeps only memories with a stale code reference (see CodeRef.Stale).
+	Stale bool
 }
 
 // List returns unexpired memories matching p, newest first.
@@ -395,9 +403,12 @@ func (s *Store) List(ctx context.Context, p ListParams) ([]Memory, error) {
 		  AND ($2::text[] IS NULL OR scope = ANY($2))
 		  AND ($3::text[] IS NULL OR type = ANY($3))
 		  AND (expires_at IS NULL OR expires_at > now())
+		  AND (NOT $5 OR EXISTS (
+		      SELECT 1 FROM memory_ref r WHERE r.memory_id = memory.id
+		        AND (r.state = 'missing' OR (r.state = 'changed' AND r.symbol <> ''))))
 		ORDER BY created_at DESC, id DESC
 		LIMIT $4`,
-		stringsOf(statuses), nilIfEmpty(p.Scopes), stringsOf(p.Types), limit)
+		stringsOf(statuses), nilIfEmpty(p.Scopes), stringsOf(p.Types), limit, p.Stale)
 	if err != nil {
 		return nil, fmt.Errorf("list: %w", err)
 	}

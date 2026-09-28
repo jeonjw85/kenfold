@@ -1,0 +1,77 @@
+{
+  "_comment": "Held-out queries (and extra memories) written without access to the ranking code; not used for tuning.",
+  "memories": [
+    {"key": "ho/pay/s-cors", "project": "github.com/acme/payments-api", "type": "episodic", "agent": "codex", "age_days": 7,
+     "content": "Session summary: 2 requests on branch feat/cors, {{DATE}} 09:00–09:40 UTC.\nRequests:\n- the dashboard can't call the API from the browser, CORS errors\n- 대시보드 도메인만 허용해줘\nFinal response:\nAdded a CORS middleware in internal/httpapi/cors.go that allows only https://app.acme.dev and echoes the Origin; credentials are allowed so the session cookie is sent."},
+    {"key": "ho/pay/cors-allow", "project": "github.com/acme/payments-api", "type": "codebase", "agent": "kenfold-extractor", "age_days": 7, "derived_from": "ho/pay/s-cors",
+     "content": "CORS is configured in internal/httpapi/cors.go to allow only the dashboard origin https://app.acme.dev with credentials enabled.",
+     "refs": [{"path": "internal/httpapi/cors.go", "state": "current"}]},
+
+    {"key": "ho/pay/s-cache-old", "project": "github.com/acme/payments-api", "type": "episodic", "agent": "claude-code", "age_days": 95,
+     "content": "Session summary: 2 requests on branch feat/cache, {{DATE}} 10:00–11:00 UTC.\nRequests:\n- add caching for merchant lookups\n- use Redis\nFinal response:\nAdded a Redis cache for merchant lookups in internal/cache/redis.go with a 10-minute TTL."},
+    {"key": "ho/pay/cache-redis-old", "project": "github.com/acme/payments-api", "type": "codebase", "agent": "codex", "age_days": 95, "derived_from": "ho/pay/s-cache-old",
+     "content": "Merchant lookups are cached in Redis (internal/cache/redis.go) with a 10-minute TTL.",
+     "refs": [{"path": "internal/cache/redis.go", "state": "missing"}]},
+    {"key": "ho/pay/s-cache-new", "project": "github.com/acme/payments-api", "type": "episodic", "agent": "claude-code", "age_days": 4,
+     "content": "Session summary: 2 requests on branch chore/drop-redis, {{DATE}} 03:00–03:50 UTC.\nRequests:\n- Redis is one more thing to run, can we drop it\n- 인메모리 캐시로 바꿔줘\nFinal response:\nReplaced the Redis merchant cache with an in-process TTL cache (internal/cache/memcache.go) using golang-lru with a 5-minute expiry; removed the Redis dependency."},
+    {"key": "ho/pay/cache-inproc-new", "project": "github.com/acme/payments-api", "type": "codebase", "agent": "kenfold-extractor", "age_days": 4, "derived_from": "ho/pay/s-cache-new",
+     "content": "Merchant lookups are cached in-process with golang-lru and a 5-minute expiry (internal/cache/memcache.go); Redis was removed.",
+     "refs": [{"path": "internal/cache/memcache.go", "state": "current"}]},
+
+    {"key": "ho/pay/s-timeout", "project": "github.com/acme/payments-api", "type": "episodic", "agent": "codex", "age_days": 11,
+     "content": "Session summary: 2 requests on branch fix/http-timeout, {{DATE}} 06:00–06:35 UTC.\nRequests:\n- calls to Stripe hang forever sometimes\n- add a timeout\nFinal response:\nGave the Stripe HTTP client a 10-second timeout and wrapped outbound calls with a context deadline in internal/stripe/client.go."},
+    {"key": "ho/pay/stripe-timeout", "project": "github.com/acme/payments-api", "type": "codebase", "agent": "kenfold-extractor", "age_days": 11, "derived_from": "ho/pay/s-timeout",
+     "content": "The Stripe HTTP client uses a 10-second timeout with a context deadline on outbound calls (internal/stripe/client.go).",
+     "refs": [{"path": "internal/stripe/client.go", "state": "current"}]},
+
+    {"key": "ho/dash/s-darkmode", "project": "github.com/acme/dashboard", "type": "episodic", "agent": "claude-code", "age_days": 5,
+     "content": "Session summary: 2 requests on branch feat/theme, {{DATE}} 07:00–07:45 UTC.\nRequests:\n- add a dark mode toggle\n- 새로고침해도 유지되게 해줘\nFinal response:\nAdded a theme toggle that stores the choice in localStorage and applies a data-theme attribute on <html>; Tailwind dark: variants pick it up. The default follows prefers-color-scheme."},
+    {"key": "ho/dash/theme-storage", "project": "github.com/acme/dashboard", "type": "codebase", "agent": "kenfold-extractor", "age_days": 5, "derived_from": "ho/dash/s-darkmode",
+     "content": "The theme choice is persisted in localStorage and applied as a data-theme attribute on the html element; Tailwind dark: variants read it.",
+     "refs": [{"path": "src/lib/theme.ts", "state": "current"}]},
+
+    {"key": "ho/dash/s-forms", "project": "github.com/acme/dashboard", "type": "episodic", "agent": "opencode", "age_days": 13,
+     "content": "Session summary: 2 requests on branch feat/forms, {{DATE}} 10:00–10:55 UTC.\nRequests:\n- standardize how we build forms\n- validation should be typed\nFinal response:\nAdopted react-hook-form with zod resolvers; shared field components live in src/components/form and all new forms validate with a zod schema."},
+    {"key": "ho/dash/forms-rhf-zod", "project": "github.com/acme/dashboard", "type": "project", "agent": "kenfold-extractor", "age_days": 13, "derived_from": "ho/dash/s-forms",
+     "content": "Build forms with react-hook-form and validate with zod schemas; shared field components are in src/components/form."},
+
+    {"key": "ho/ml/s-serve-latency", "project": "github.com/acme/ml-pipeline", "type": "episodic", "agent": "codex", "age_days": 8,
+     "content": "Session summary: 2 requests on branch fix/serve-latency, {{DATE}} 04:00–05:10 UTC.\nRequests:\n- the scoring endpoint is slow under load\n- 배치로 묶어서 처리해봐\nFinal response:\nAdded micro-batching to the serving handler (serving/app.py): requests within a 20ms window are scored together; p99 latency dropped from 180ms to 60ms."},
+    {"key": "ho/ml/serve-batching", "project": "github.com/acme/ml-pipeline", "type": "codebase", "agent": "kenfold-extractor", "age_days": 8, "derived_from": "ho/ml/s-serve-latency",
+     "content": "The serving handler (serving/app.py) micro-batches requests within a 20ms window before scoring to reduce p99 latency.",
+     "refs": [{"path": "serving/app.py", "state": "current"}]},
+
+    {"key": "ho/ml/data-source", "project": "github.com/acme/ml-pipeline", "type": "codebase", "agent": "claude-code", "age_days": 22,
+     "content": "Training data is read from Parquet files in the s3://acme-ml/churn/ bucket, partitioned by date.",
+     "refs": [{"path": "data/loader.py", "state": "current"}]}
+  ],
+  "queries": [
+    {"id": "ho-pay-browser-block", "split": "holdout", "project": "github.com/acme/payments-api", "query": "브라우저에서 API 부를 때 어떤 출처만 허용돼?", "relevant": ["ho/pay/cors-allow", "ho/pay/s-cors"]},
+    {"id": "ho-pay-cache-now", "split": "holdout", "project": "github.com/acme/payments-api", "query": "how are merchant lookups cached these days?", "relevant": ["ho/pay/cache-inproc-new", "ho/pay/s-cache-new"]},
+    {"id": "ho-pay-stripe-hang", "split": "holdout", "project": "github.com/acme/payments-api", "query": "Stripe 호출이 안 끝나고 멈추는 걸 어떻게 막았지?", "relevant": ["ho/pay/stripe-timeout", "ho/pay/s-timeout"]},
+    {"id": "ho-pay-dup-webhook-store", "split": "holdout", "project": "github.com/acme/payments-api", "query": "where do we track which webhook events we've already seen?", "relevant": ["pay/webhook-dedupe", "pay/s-webhook-1"]},
+    {"id": "ho-pay-charge-header", "split": "holdout", "project": "github.com/acme/payments-api", "query": "결제 요청 중복 방지하려면 어떤 헤더 보내야 해?", "relevant": ["pay/idempotency-key", "pay/s-charges-idem"]},
+    {"id": "ho-pay-limit-current", "split": "holdout", "project": "github.com/acme/payments-api", "query": "how many requests per minute are clients allowed?", "relevant": ["pay/rate-limit", "pay/s-ratelimit"]},
+    {"id": "ho-pay-schema-changes", "split": "holdout", "project": "github.com/acme/payments-api", "query": "can I tweak a migration file that's already on main?", "relevant": ["pay/goose"]},
+    {"id": "ho-pay-jwt-status", "split": "holdout", "project": "github.com/acme/payments-api", "query": "만료된 토큰이면 무슨 상태 코드 나가?", "relevant": ["pay/token-expiry", "pay/s-auth"]},
+    {"id": "ho-pay-recent-webhook", "split": "holdout", "project": "github.com/acme/payments-api", "query": "최근에 웹훅 관련해서 마지막으로 뭐 했어?", "relevant": ["pay/s-webhook-3"]},
+    {"id": "ho-pay-deploy-window", "split": "holdout", "project": "github.com/acme/payments-api", "query": "is it safe to run a big data backfill while a release is going out?", "relevant": ["pay/backfill-deploy", "pay/s-deploy-incident"]},
+
+    {"id": "ho-dash-theme-persist", "split": "holdout", "project": "github.com/acme/dashboard", "query": "다크모드 선택이 새로고침 후에도 유지되는 이유가 뭐야?", "relevant": ["ho/dash/theme-storage", "ho/dash/s-darkmode"]},
+    {"id": "ho-dash-forms", "split": "holdout", "project": "github.com/acme/dashboard", "query": "what's the standard way to build a form with validation here?", "relevant": ["ho/dash/forms-rhf-zod", "ho/dash/s-forms"]},
+    {"id": "ho-dash-button-style", "split": "holdout", "project": "github.com/acme/dashboard", "query": "버튼 스타일은 어디에 정의돼 있어?", "relevant": ["dash/button-now", "dash/s-tailwind"]},
+    {"id": "ho-dash-pkg-manager", "split": "holdout", "project": "github.com/acme/dashboard", "query": "yarn add 해도 괜찮아?", "relevant": ["dash/pnpm", "dash/s-setup"]},
+    {"id": "ho-dash-cookie-domain", "split": "holdout", "project": "github.com/acme/dashboard", "query": "why does the browser not keep the session after login?", "relevant": ["dash/cookie-domain", "dash/s-login-bug"]},
+    {"id": "ho-dash-translations", "split": "holdout", "project": "github.com/acme/dashboard", "query": "adding user-facing text, what's the process for translations?", "relevant": ["dash/i18n"]},
+    {"id": "ho-dash-secret-env", "split": "holdout", "project": "github.com/acme/dashboard", "query": "API 비밀키를 클라이언트에서 읽을 수 있는 환경변수에 넣어도 돼?", "relevant": ["dash/env"]},
+
+    {"id": "ho-ml-serve-slow", "split": "holdout", "project": "github.com/acme/ml-pipeline", "query": "how did we speed up the scoring endpoint?", "relevant": ["ho/ml/serve-batching", "ho/ml/s-serve-latency"]},
+    {"id": "ho-ml-data-loc", "split": "holdout", "project": "github.com/acme/ml-pipeline", "query": "훈련 데이터 어디서 읽어와?", "relevant": ["ho/ml/data-source"]},
+    {"id": "ho-ml-new-pkg", "split": "holdout", "project": "github.com/acme/ml-pipeline", "query": "pip install 써도 돼?", "relevant": ["ml/uv"]},
+    {"id": "ho-ml-repro", "split": "holdout", "project": "github.com/acme/ml-pipeline", "query": "how do we make training runs reproducible?", "relevant": ["ml/seed"]},
+    {"id": "ho-ml-slow-tests", "split": "holdout", "project": "github.com/acme/ml-pipeline", "query": "느린 테스트는 어떻게 돌려?", "relevant": ["ml/pytest-markers"]},
+
+    {"id": "ho-user-push", "split": "holdout", "project": "github.com/acme/payments-api", "query": "can I just push this to the remote?", "relevant": ["user/ask-push"]},
+    {"id": "ho-user-bugfix-flow", "split": "holdout", "project": "github.com/acme/dashboard", "query": "버그 고칠 때 순서 어떻게 하라고 했지?", "relevant": ["user/tests-first"]}
+  ]
+}
