@@ -36,7 +36,7 @@ func (s *Store) ClaimExtraction(ctx context.Context, notBefore time.Time, lease 
 		err := tx.QueryRow(ctx, `
 			SELECT m.id FROM memory m
 			LEFT JOIN extraction e ON e.source_id = m.id
-			WHERE m.type = 'episodic' AND m.status = 'active' AND m.created_at < $1
+			WHERE m.type = 'episodic' AND m.status = 'active' AND m.created_at < $1 AND `+notDigest+`
 			  AND (e.source_id IS NULL
 			       OR (e.status = 'failed' AND e.next_attempt_at IS NOT NULL AND e.next_attempt_at <= now())
 			       OR (e.status = 'running' AND e.locked_until < now()))
@@ -113,7 +113,7 @@ func (s *Store) ExtractionStatus(ctx context.Context) (ExtractionStats, error) {
 		       count(*) FILTER (WHERE e.status = 'failed'),
 		       coalesce(sum(e.stored), 0)
 		FROM memory m LEFT JOIN extraction e ON e.source_id = m.id
-		WHERE m.type = 'episodic' AND m.status = 'active'`).Scan(&st.Pending, &st.Running, &st.Done, &st.Failed, &st.Stored)
+		WHERE m.type = 'episodic' AND m.status = 'active' AND `+notDigest).Scan(&st.Pending, &st.Running, &st.Done, &st.Failed, &st.Stored)
 	return st, err
 }
 

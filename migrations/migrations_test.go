@@ -212,12 +212,36 @@ func TestMigrationsIntegration(t *testing.T) {
 		t.Errorf("oauth rows after cascade = %d, %v", oauthRows, err)
 	}
 
+	// 00007: a member set is judged once; kinds carry what they need.
+	var c1, c2, c3 string
+	for _, dst := range []*string{&c1, &c2, &c3} {
+		if err := db.QueryRowContext(ctx, `INSERT INTO memory (type, scope, content, source_agent) VALUES ('project', 'project:x', 'consolidation member ' || gen_random_uuid(), 't') RETURNING id::text`).Scan(dst); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pair := func(a, b string) string { return "{" + min(a, b) + "," + max(a, b) + "}" }
+	if err := exec(`INSERT INTO consolidation (kind, scope, member_ids, keep_id, model) VALUES ('duplicate', 'project:x', $1, $2, 'm')`, pair(c1, c2), c1); err != nil {
+		t.Fatalf("insert proposal: %v", err)
+	}
+	for name, q := range map[string][]any{
+		"the same member set twice":   {`INSERT INTO consolidation (kind, scope, member_ids, model, status) VALUES ('distinct', 'project:x', $1, 'm', 'dismissed')`, pair(c1, c2)},
+		"a conflict without keep_id":  {`INSERT INTO consolidation (kind, scope, member_ids, model) VALUES ('conflict', 'project:x', $1, 'm')`, pair(c1, c3)},
+		"keep_id outside the members": {`INSERT INTO consolidation (kind, scope, member_ids, keep_id, model) VALUES ('conflict', 'project:x', $1, $2, 'm')`, pair(c1, c3), c2},
+		"a pending distinct pair":     {`INSERT INTO consolidation (kind, scope, member_ids, model) VALUES ('distinct', 'project:x', $1, 'm')`, pair(c1, c3)},
+		"a digest without content":    {`INSERT INTO consolidation (kind, scope, member_ids, model) VALUES ('digest', 'project:x', $1, 'm')`, pair(c1, c3)},
+		"a one-member set":            {`INSERT INTO consolidation (kind, scope, member_ids, model, status) VALUES ('distinct', 'project:x', $1, 'm', 'dismissed')`, "{" + c3 + "}"},
+	} {
+		if err := exec(q[0].(string), q[1:]...); err == nil {
+			t.Errorf("accepted %s", name)
+		}
+	}
+
 	// Down must fully revert.
 	if _, err := p.DownTo(ctx, 0); err != nil {
 		t.Fatalf("down: %v", err)
 	}
 	var tables int
-	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pg_tables WHERE tablename IN ('memory', 'memory_edge', 'api_key', 'extraction', 'memory_ref', 'oauth_owner', 'oauth_client', 'oauth_grant', 'oauth_code', 'oauth_token')`).Scan(&tables); err != nil || tables != 0 {
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pg_tables WHERE tablename IN ('memory', 'memory_edge', 'api_key', 'extraction', 'memory_ref', 'oauth_owner', 'oauth_client', 'oauth_grant', 'oauth_code', 'oauth_token', 'consolidation')`).Scan(&tables); err != nil || tables != 0 {
 		t.Errorf("tables after down = %d, %v; want 0", tables, err)
 	}
 	// Leave the schema migrated for manual inspection.

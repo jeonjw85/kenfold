@@ -26,10 +26,10 @@ import (
 // Proposal is a consolidation proposal as the dashboard shows it.
 type Proposal struct {
 	ID        string
-	Kind      string // "merge", "conflict", or "digest"
+	Kind      string // "duplicate", "conflict", or "digest"
 	Scope     string
-	Content   string // the merged statement or digest ("" for conflicts)
-	Keep      string // conflicts: the id of the memory to keep
+	Content   string // digest: the summary that replaces the sessions
+	Keep      string // duplicate, conflict: the id of the memory that stays
 	Reason    string
 	Model     string
 	Members   []store.Memory

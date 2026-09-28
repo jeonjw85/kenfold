@@ -106,9 +106,9 @@ reindex: ## Embed memories that have no embedding for the configured model
 review: ## Review proposed memories (extracted memories, preferences) interactively
 	docker compose exec kenfold /usr/local/bin/kenfold memory review
 
-eval: ## Measure extraction and classification on the internal eval set (needs `make up-extract`)
+eval: ## Measure extraction, classification, and consolidation on the internal eval sets (needs `make up-extract`)
 	KENFOLD_EVAL_CHAT_URL=http://127.0.0.1:11435/v1 KENFOLD_EVAL_CHAT_MODEL=$(EXTRACT_MODEL) \
-	  go test -count=1 -run TestEvalModel -v -timeout 30m ./internal/extract/
+	  go test -count=1 -run TestEvalModel -v -timeout 45m ./internal/extract/ ./internal/consolidate/
 
 eval-search: ## Measure retrieval (recall@5 per pipeline stage) on the internal corpus (needs `make up-embed`)
 	@docker compose exec -T postgres psql -U kenfold -d kenfold -tAc \

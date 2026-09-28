@@ -20,7 +20,7 @@ What makes it different (see [ADR-0001](docs/adr/0001-architecture.md)):
 - **Handoff** between agents: stop in Claude Code, resume in Codex
 - **Poisoning-aware**: memory is served as data, never as instructions; preferences need your approval
 
-> **Status: Phase 5 in progress.** Shared storage, hybrid search with **reranking, graph expansion, and recency**, API keys, setup for Claude Code, Codex, and OpenCode, a server-side **secret filter**, duplicate and contradiction hints, **session hooks** that load memory at session start and record a summary at session end, optional **model-based extraction** that turns session summaries into memories for your review, **code references** that flag memories whose code changed or disappeared, and **remote access** with a built-in OAuth server for ChatGPT, claude.ai, and agents on other machines. Phase 5 has added **backups** (export and import) and a **review dashboard** in the browser.
+> **Status: Phase 5 in progress.** Shared storage, hybrid search with **reranking, graph expansion, and recency**, API keys, setup for Claude Code, Codex, and OpenCode, a server-side **secret filter**, duplicate and contradiction hints, **session hooks** that load memory at session start and record a summary at session end, optional **model-based extraction** that turns session summaries into memories for your review, **code references** that flag memories whose code changed or disappeared, and **remote access** with a built-in OAuth server for ChatGPT, claude.ai, and agents on other machines. Phase 5 has added **backups** (export and import), a **review dashboard** in the browser, and **consolidation**, which proposes to retire duplicate and contradicted memories and to digest old sessions.
 
 ## Quickstart
 
@@ -138,6 +138,24 @@ The model runs on CPU in Docker and takes 10–30 seconds per session, in the ba
 
 `KENFOLD_EXTRACT_POLICY=auto` activates confident extractions that resemble no existing memory without review. Preferences are always reviewed. Keep the default unless you trust every source of your sessions: extraction is where instructions hidden in pasted content could become memory, and review is the main defense.
 
+## Consolidation
+
+With a chat model configured (`make up-extract`), Kenfold also looks for memory that has piled up and proposes to clean it up:
+
+- **Duplicates**: two memories where one says everything the other says, e.g. from two agents. The one that says more stays.
+- **Contradictions**: e.g. "use npm" and, later, "use pnpm, not npm". The newer one stays.
+- **Old sessions**: when a project has 6 or more session summaries older than 30 days, the oldest 10 are replaced by one digest.
+
+Nothing changes until you apply a proposal, on the dashboard's Consolidation page or with the CLI. Retired memories are kept as history and linked from the memory that replaces them. Nothing is rewritten: a duplicate or contradiction keeps one of the existing memories as it was written. A proposal you reject is not made again.
+
+```sh
+bin/kenfold consolidate list                 # pending proposals
+bin/kenfold consolidate apply <id>           # or reject <id>
+bin/kenfold consolidate run                  # look now instead of every 15 minutes
+```
+
+Candidates are pairs of similar memories. The model judges each pair twice, with the memories in both orders, and a pair is proposed only if both answers agree. Digests are checked against their sessions: every file name, identifier, and number in a digest must appear in them. The model judges each pair in 7–16 seconds on CPU, and the worker yields to extraction. On the internal eval set it judged 12 of 12 pairs correctly ([internal/consolidate/testdata/RESULTS.md](internal/consolidate/testdata/RESULTS.md)). See [ADR-0004](docs/adr/0004-consolidation.md) for the rules. `KENFOLD_CONSOLIDATE=false` turns consolidation off.
+
 ## Code references
 
 Memories about code go stale when the code changes. When an agent stores "`RequireAPIKey` in internal/auth/middleware.go hashes the bearer token", Kenfold records the file and the symbol. At session start, the hook hashes them at your repository's `HEAD` (symbols are located with tree-sitter) and tells the server; after a later commit removes or rewrites `RequireAPIKey`, the memory is marked **stale**. Stale memories rank lower in search, come last in the project knowledge given at session start, and are shown to agents with a note such as "(outdated? RequireAPIKey in internal/auth/middleware.go changed since this was written)".
@@ -183,6 +201,7 @@ bin/kenfold memory forget <id> --reason "outdated"
 Open http://127.0.0.1:7077/dashboard/ and log in with the owner password. Set it once with `docker compose exec kenfold /usr/local/bin/kenfold password`; the same password approves OAuth clients.
 
 - **Review**: proposed memories (extracted memories, and preferences agents stored), oldest first, with the quote each came from and similar active memories. Approve, reject, or approve and replace an old memory, which is kept as history.
+- **Consolidation** (with a chat model): proposals to retire duplicates and contradicted memories and to digest old sessions; apply or reject them.
 - **Memories**: search as agents see it, or list by scope, type, and status, including memories whose code changed. Each memory shows its provenance, versions, links, and code references, and can be forgotten.
 - **Clients**: API keys and OAuth clients with their last use; revoke them. New keys are created on the server only.
 
@@ -252,6 +271,10 @@ kenfold memory reject <id>... [--reason R]
 kenfold memory forget <id> [--reason R]
 kenfold extract status               extraction progress
 kenfold extract run [--limit N]      extract memories from session summaries now
+kenfold consolidate status|list      consolidation proposals
+kenfold consolidate run [--limit N]  look for duplicates, contradictions, and old sessions now
+kenfold consolidate apply|reject <id>...
+                                     carry out a proposal, or keep the memories as they are
 kenfold password                     set the owner password (dashboard login, OAuth consent page)
 kenfold oauth clients [--all]        approved OAuth clients (ChatGPT, claude.ai, ...)
 kenfold oauth revoke <grant>         revoke an OAuth client and its tokens
@@ -300,6 +323,7 @@ kenfold version
 | `KENFOLD_EXTRACT` | on when a chat model is configured |
 | `KENFOLD_EXTRACT_POLICY` | `propose` (review everything) or `auto` |
 | `KENFOLD_CLASSIFY` | on when a chat model is configured; types memories stored without one |
+| `KENFOLD_CONSOLIDATE` | on when a chat model is configured; proposes to retire duplicates and contradicted memories and to digest old sessions |
 | `KENFOLD_LOG_LEVEL` | `info` |
 
 The hook and `kenfold refs sync` read `KENFOLD_URL` (default `http://127.0.0.1:7077/mcp`; the REST API is at `/api/v1` next to it) and `KENFOLD_API_KEY` (unless `--key-file` is given); the hook also reads `KENFOLD_STATE_DIR` (default `~/.local/state/kenfold`).
@@ -312,7 +336,7 @@ Changing `KENFOLD_EMBED_MODEL` to another 1024-dimensional model needs no migrat
 make test               # unit tests + stdio end-to-end test (no database needed)
 make test-integration   # store, API key, migration, cross-agent, handoff, code-reference, and OAuth tests against the compose Postgres
 make lint               # gofmt + go vet
-make eval               # extraction quality against a real model (needs make up-extract)
+make eval               # extraction and consolidation quality against a real model (needs make up-extract)
 make eval-search        # retrieval quality per pipeline stage (needs make up-embed)
 make build              # ./bin/kenfold
 make logs | make down
@@ -331,6 +355,7 @@ internal/restapi/     REST API (/api/v1) for non-agent clients
 internal/dashboard/   web dashboard for the owner: review, memories, clients (server-rendered, no JavaScript)
 internal/hook/        Claude Code / Codex session hook: context injection, capture, spool
 internal/extract/     model-based memory extraction and classification; eval set
+internal/consolidate/ consolidation proposals: duplicates, contradictions, digests of old sessions; eval set
 internal/chat/        OpenAI-compatible chat client (structured output)
 internal/secrets/     credential detection and redaction
 internal/apikey/      API keys and the bearer-token verifier
@@ -355,4 +380,4 @@ docs/                 ADRs and specs
 | **2b** ✅ | Model-based extraction of memories from sessions (reviewed), type classification |
 | **3** ✅ | Rerank, graph expansion, recency and staleness in ranking, code references with commit-based invalidation (tree-sitter symbols), REST API |
 | **4** ✅ | OAuth 2.1 authorization server (client metadata documents, dynamic registration, `private_key_jwt`, read-only grants), remote deployment behind a tunnel or proxy; verified end to end with the MCP SDK's OAuth client over HTTPS, not yet from ChatGPT itself. Object storage and an OpenAI-compatible proxy were deferred ([ADR-0003](docs/adr/0003-remote-access-and-oauth.md)) |
-| 5 | Export/import ✅, review dashboard ✅; consolidation, public benchmarks (LongMemEval, LoCoMo) |
+| 5 | Export/import ✅, review dashboard ✅, consolidation ✅ ([ADR-0004](docs/adr/0004-consolidation.md)); public benchmarks (LongMemEval, LoCoMo) |

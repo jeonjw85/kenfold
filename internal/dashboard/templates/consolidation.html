@@ -3,20 +3,20 @@
 {{if not .Consol}}
 <p class="empty">Consolidation is not enabled on this server.</p>
 {{else}}
-<p class="muted">Kenfold looks for memories that say the same thing, contradict each other, or are old session summaries, and proposes to merge, retire, or summarize them. Nothing changes until you apply a proposal; replaced memories are kept as history.</p>
+<p class="muted">Kenfold looks for memories that say the same thing, contradict each other, or are old session summaries, and proposes to retire duplicates, retire the older of two contradicting memories, or replace old sessions with a digest. Nothing changes until you apply a proposal; replaced memories are kept as history.</p>
 {{if not .Data}}
 <p class="empty">No proposals.</p>
 {{else}}
 {{range .Data}}{{$p := .}}
 <article class="item" aria-labelledby="p-{{.ID}}">
-  <p class="meta"><span class="badge kind-{{.Kind}}">{{if eq .Kind "merge"}}same fact{{else if eq .Kind "conflict"}}contradiction{{else}}session digest{{end}}</span> <span class="scope">{{scopeLabel .Scope}}</span> · proposed by {{.Model}}, {{ts .CreatedAt}}</p>
+  <p class="meta"><span class="badge kind-{{.Kind}}">{{if eq .Kind "duplicate"}}duplicate{{else if eq .Kind "conflict"}}contradiction{{else}}session digest{{end}}</span> <span class="scope">{{scopeLabel .Scope}}</span> · proposed by {{.Model}}, {{ts .CreatedAt}}</p>
   <h2 id="p-{{.ID}}" class="sr">Proposal {{short .ID}}</h2>
   {{if .Reason}}<p>{{.Reason}}</p>{{end}}
   <h3>{{if eq .Kind "digest"}}Sessions{{else}}Memories{{end}}</h3>
-  <ul class="members">{{range .Members}}<li{{if eq .ID $p.Keep}} class="keep"{{end}}>{{if eq .ID $p.Keep}}<span class="badge keep">keep</span> {{else if eq $p.Kind "conflict"}}<span class="badge retire">retire</span> {{end}}<a href="/dashboard/memories/{{.ID}}">{{trunc .Content 300}}</a> <span class="meta">({{.SourceAgent}}, {{ts .CreatedAt}})</span></li>{{end}}</ul>
-  {{if .Content}}<h3>{{if eq .Kind "digest"}}Digest{{else}}Merged memory{{end}}</h3><p class="content proposed">{{.Content}}</p>{{end}}
+  <ul class="members">{{range .Members}}<li{{if eq .ID $p.Keep}} class="keep"{{end}}>{{if eq .ID $p.Keep}}<span class="badge keep">keep</span> {{else if ne $p.Kind "digest"}}<span class="badge retire">retire</span> {{end}}<a href="/dashboard/memories/{{.ID}}">{{trunc .Content 300}}</a> <span class="meta">({{.SourceAgent}}, {{ts .CreatedAt}})</span></li>{{end}}</ul>
+  {{if eq .Kind "digest"}}<h3>Digest</h3><p class="content proposed">{{.Content}}</p>{{end}}
   <div class="actions">
-    <form method="post" action="/dashboard/consolidation/{{.ID}}/apply" class="inline">{{template "csrf" $}}<button type="submit">{{if eq .Kind "conflict"}}Retire the other{{else if eq .Kind "digest"}}Replace with the digest{{else}}Merge{{end}}</button></form>
+    <form method="post" action="/dashboard/consolidation/{{.ID}}/apply" class="inline">{{template "csrf" $}}<button type="submit">{{if eq .Kind "conflict"}}Retire the older one{{else if eq .Kind "digest"}}Replace with the digest{{else}}Retire the duplicate{{end}}</button></form>
     <form method="post" action="/dashboard/consolidation/{{.ID}}/reject" class="inline">{{template "csrf" $}}<button type="submit" class="secondary">Keep as they are</button></form>
   </div>
 </article>

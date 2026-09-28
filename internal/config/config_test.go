@@ -68,19 +68,19 @@ func TestLoadOverrides(t *testing.T) {
 
 func TestChatConfig(t *testing.T) {
 	c, err := LoadFrom(env(nil))
-	if err != nil || c.Chat.Enabled() || c.Extract || c.Classify || c.Chat.Model != DefaultChatModel || c.Chat.Reasoning != "none" || c.ExtractPolicy != ExtractPropose {
+	if err != nil || c.Chat.Enabled() || c.Extract || c.Classify || c.Consolidate || c.Chat.Model != DefaultChatModel || c.Chat.Reasoning != "none" || c.ExtractPolicy != ExtractPropose {
 		t.Errorf("defaults: %+v %v", c.Chat, err)
 	}
 	// A chat URL turns extraction and classification on by default.
 	c, err = LoadFrom(env(map[string]string{"KENFOLD_CHAT_URL": "http://ollama:11434/v1"}))
-	if err != nil || !c.Extract || !c.Classify {
-		t.Errorf("enabled defaults: extract %v classify %v %v", c.Extract, c.Classify, err)
+	if err != nil || !c.Extract || !c.Classify || !c.Consolidate {
+		t.Errorf("enabled defaults: extract %v classify %v consolidate %v %v", c.Extract, c.Classify, c.Consolidate, err)
 	}
 	c, err = LoadFrom(env(map[string]string{
 		"KENFOLD_CHAT_URL": "http://ollama:11434/v1", "KENFOLD_CHAT_MODEL": "kenfold-extract", "KENFOLD_CHAT_API_KEY": "sk-x",
-		"KENFOLD_CHAT_REASONING": "OMIT", "KENFOLD_EXTRACT": "false", "KENFOLD_CLASSIFY": "true", "KENFOLD_EXTRACT_POLICY": "Auto",
+		"KENFOLD_CHAT_REASONING": "OMIT", "KENFOLD_EXTRACT": "false", "KENFOLD_CLASSIFY": "true", "KENFOLD_CONSOLIDATE": "0", "KENFOLD_EXTRACT_POLICY": "Auto",
 	}))
-	if err != nil || c.Extract || !c.Classify || c.Chat.Model != "kenfold-extract" || c.Chat.APIKey != "sk-x" || c.Chat.Reasoning != "omit" || c.ExtractPolicy != ExtractAuto {
+	if err != nil || c.Extract || !c.Classify || c.Consolidate || c.Chat.Model != "kenfold-extract" || c.Chat.APIKey != "sk-x" || c.Chat.Reasoning != "omit" || c.ExtractPolicy != ExtractAuto {
 		t.Errorf("overrides: %+v extract %v classify %v policy %s %v", c.Chat, c.Extract, c.Classify, c.ExtractPolicy, err)
 	}
 	// Explicitly disabling without a chat model is fine.
@@ -150,8 +150,9 @@ func TestLoadInvalid(t *testing.T) {
 		{"KENFOLD_CHAT_URL": "ollama:11434"},
 		{"KENFOLD_CHAT_URL": "http://x/v1", "KENFOLD_CHAT_REASONING": "maximum"},
 		{"KENFOLD_EXTRACT_POLICY": "yolo"},
-		{"KENFOLD_EXTRACT": "true"},  // no chat model
-		{"KENFOLD_CLASSIFY": "true"}, // no chat model
+		{"KENFOLD_EXTRACT": "true"},     // no chat model
+		{"KENFOLD_CLASSIFY": "true"},    // no chat model
+		{"KENFOLD_CONSOLIDATE": "true"}, // no chat model
 		{"KENFOLD_CHAT_URL": "http://x/v1", "KENFOLD_EXTRACT": "perhaps"},
 		{"KENFOLD_AUTO_MIGRATE": "maybe"},
 		{"KENFOLD_LOG_LEVEL": "loud"},

@@ -1,0 +1,24 @@
+{
+  "pairs": [
+    {"id": "same-version", "a": "Use pnpm for installing packages.", "b": "Install packages with pnpm, not npm; pnpm 9 is required.", "want": "same", "keep": "B"},
+    {"id": "same-older-detailed", "a": "Database migrations are managed with goose; never edit a merged migration.", "b": "Migrations use goose.", "want": "same", "keep": "A"},
+    {"id": "same-ko-en", "a": "답변은 한국어로 해 주세요.", "b": "Answer in Korean.", "want": "same"},
+    {"id": "same-paraphrase", "a": "The webhook handler dedupes Stripe events by event_id.", "b": "Stripe webhook events are deduplicated by their event_id in the webhook handler.", "want": "same"},
+    {"id": "conflict-port", "a": "The API server listens on port 8080.", "b": "The API server now listens on port 9090.", "want": "conflict"},
+    {"id": "conflict-friday", "a": "We deploy on Fridays after the release review.", "b": "We never deploy on Fridays.", "want": "conflict"},
+    {"id": "conflict-ko", "a": "테스트는 Jest로 실행한다.", "b": "테스트는 Jest 대신 Vitest로 실행한다.", "want": "conflict"},
+    {"id": "conflict-tool", "a": "Use npm to install packages.", "b": "Use pnpm, not npm, to install packages.", "want": "conflict"},
+    {"id": "distinct-steps", "a": "The webhook handler dedupes events by event_id.", "b": "The webhook handler verifies the Stripe signature first.", "want": "distinct"},
+    {"id": "distinct-tests", "a": "Run unit tests with make test.", "b": "Run integration tests with make test-integration against the compose Postgres.", "want": "distinct"},
+    {"id": "distinct-hashes", "a": "API keys are stored as SHA-256 hashes.", "b": "OAuth tokens are stored as SHA-256 hashes.", "want": "distinct"},
+    {"id": "distinct-details", "a": "The export command writes JSON Lines and leaves out embeddings.", "b": "The export command writes JSON Lines and creates its files with mode 0600.", "want": "distinct"}
+  ],
+  "digest": [
+    "Session summary: added `kenfold export`, which writes memories to a JSON Lines archive (internal/store/archive.go). Embeddings are left out.",
+    "Session summary: import now refuses truncated archives by checking the end record's counts.",
+    "Session summary: 사용자가 export 파일 권한을 0600으로 해 달라고 요청함. --out 파일은 0600으로 생성하도록 수정.",
+    "Session summary: fixed a bug where import wrote code references before their memories; tests in archive_integration_test.go pass.",
+    "Session summary: decided that import keeps existing memories unchanged, so running it twice is harmless.",
+    "Session summary: open question: whether to export consolidation proposals. Left out for now."
+  ]
+}

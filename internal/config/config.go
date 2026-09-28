@@ -63,6 +63,10 @@ type Config struct {
 	// Classify uses the chat model to type memories stored without a type
 	// (default: on when Chat is configured).
 	Classify bool
+	// Consolidate runs the background consolidation worker, which proposes
+	// to retire duplicates and contradicted memories and to digest old
+	// session summaries (default: on when Chat is configured).
+	Consolidate bool
 
 	// Rerank configures a cross-encoder reranker for search; disabled when
 	// Rerank.URL is empty.
@@ -289,11 +293,11 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 	default:
 		return Config{}, fmt.Errorf("KENFOLD_EXTRACT_POLICY: %q is not one of %s, %s", c.ExtractPolicy, ExtractPropose, ExtractAuto)
 	}
-	// Extraction and classification default to on when a chat model is configured.
+	// Extraction, classification, and consolidation default to on when a chat model is configured.
 	for _, s := range []struct {
 		key string
 		dst *bool
-	}{{"KENFOLD_EXTRACT", &c.Extract}, {"KENFOLD_CLASSIFY", &c.Classify}} {
+	}{{"KENFOLD_EXTRACT", &c.Extract}, {"KENFOLD_CLASSIFY", &c.Classify}, {"KENFOLD_CONSOLIDATE", &c.Consolidate}} {
 		*s.dst = c.Chat.Enabled()
 		if strings.TrimSpace(getenv(s.key)) != "" {
 			b, err := boolEnv(getenv, s.key)

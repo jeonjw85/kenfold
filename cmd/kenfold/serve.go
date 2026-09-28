@@ -21,6 +21,7 @@ import (
 	"github.com/kenfold/kenfold/internal/chat"
 	"github.com/kenfold/kenfold/internal/coderef"
 	"github.com/kenfold/kenfold/internal/config"
+	"github.com/kenfold/kenfold/internal/consolidate"
 	"github.com/kenfold/kenfold/internal/dashboard"
 	"github.com/kenfold/kenfold/internal/embed"
 	"github.com/kenfold/kenfold/internal/extract"
@@ -42,8 +43,10 @@ const (
 	backfillBatch    = 64
 	// extractInterval is how often `serve` looks for new session summaries.
 	extractInterval = time.Minute
-	probeTimeout    = 15 * time.Second
-	schemaTimeout   = 10 * time.Second
+	// consolidateInterval is how often `serve` looks for memories to consolidate.
+	consolidateInterval = 15 * time.Minute
+	probeTimeout        = 15 * time.Second
+	schemaTimeout       = 10 * time.Second
 )
 
 // runtime holds the long-lived dependencies shared by the servers.
@@ -115,6 +118,22 @@ func (rt *runtime) classifier(cfg config.Config) mcpserver.Classifier {
 	return extract.Classifier{Chat: rt.chat}
 }
 
+// consolidator returns the background consolidation worker, or nil when
+// disabled. It yields to extraction, which shares the model.
+func (rt *runtime) consolidator(cfg config.Config, logger *slog.Logger) *consolidate.Worker {
+	if rt.chat == nil || !cfg.Consolidate {
+		return nil
+	}
+	w := &consolidate.Worker{Store: rt.store, Chat: rt.chat, Logger: logger}
+	if cfg.Extract {
+		w.Yield = func(ctx context.Context) bool {
+			st, err := rt.store.ExtractionStatus(ctx)
+			return err == nil && st.Pending > 0
+		}
+	}
+	return w
+}
+
 // extractor returns the background extraction worker, or nil when disabled.
 func (rt *runtime) extractor(cfg config.Config, logger *slog.Logger) *extract.Worker {
 	if rt.chat == nil || !cfg.Extract {
@@ -162,8 +181,9 @@ func httpHandler(cfg config.Config, rt *runtime, logger *slog.Logger) http.Handl
 			Store: rt.store, Keys: rt.keys, Owner: rt.oauthDB, Logger: logger, Version: buildinfo.Version,
 			Retriever: &retrieve.Retriever{Store: rt.store, Embedder: rt.embedderIface(), Reranker: rt.rerankerIface(), Logger: logger,
 				Options: retrieve.Options{MaxDistance: cfg.SearchMaxDistance}},
-			Remote:     cfg.Dashboard == config.DashboardRemote,
-			PublicHost: publicHost(cfg.PublicURL),
+			Consolidation: rt.consolidationView(cfg),
+			Remote:        cfg.Dashboard == config.DashboardRemote,
+			PublicHost:    publicHost(cfg.PublicURL),
 		})
 		if err != nil {
 			panic(err) // embedded templates: a parse error is a build defect
@@ -252,10 +272,13 @@ func (c *cli) serve(ctx context.Context) error {
 	}
 	if rt.chat != nil {
 		c.logger.Info("chat model configured", "endpoint", rt.chat.Endpoint(), "model", rt.chat.Model(),
-			"extract", c.cfg.Extract, "extract_policy", c.cfg.ExtractPolicy, "classify", c.cfg.Classify)
+			"extract", c.cfg.Extract, "extract_policy", c.cfg.ExtractPolicy, "classify", c.cfg.Classify, "consolidate", c.cfg.Consolidate)
 	}
 	if w := rt.extractor(c.cfg, c.logger); w != nil {
 		wg.Go(func() { w.Loop(bgCtx, extractInterval) })
+	}
+	if w := rt.consolidator(c.cfg, c.logger); w != nil {
+		wg.Go(func() { w.Loop(bgCtx, consolidateInterval) })
 	}
 
 	srv := &http.Server{

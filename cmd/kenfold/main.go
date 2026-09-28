@@ -47,6 +47,11 @@ Usage:
 
   kenfold extract status               progress of memory extraction from session summaries
   kenfold extract run [--limit N]      extract memories now (needs KENFOLD_CHAT_URL)
+  kenfold consolidate status           consolidation proposals by status
+  kenfold consolidate run [--limit N]  look for duplicates, contradictions, and old sessions now (needs KENFOLD_CHAT_URL)
+  kenfold consolidate list             pending proposals
+  kenfold consolidate apply <id>...    carry out proposals (retired memories are kept as history)
+  kenfold consolidate reject <id>...   keep the memories as they are
 
   kenfold password                     set the owner password (dashboard login, OAuth consent page)
   kenfold oauth clients [--all]        OAuth clients the owner approved (ChatGPT, claude.ai, ...)
@@ -100,6 +105,7 @@ Environment:
   KENFOLD_EXTRACT              extract memories from session summaries (default: on with a chat model)
   KENFOLD_EXTRACT_POLICY       propose (review everything) | auto   (default propose)
   KENFOLD_CLASSIFY             classify memories stored without a type (default: on with a chat model)
+  KENFOLD_CONSOLIDATE          propose to retire duplicates and digest old sessions (default: on with a chat model)
   KENFOLD_LOG_LEVEL            debug|info|warn|error      (default info)
 
 Hook and refs sync environment:
@@ -199,6 +205,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdin i
 		return c.oauthCmd(ctx, rest)
 	case "password":
 		return c.oauthPassword(ctx, rest)
+	case "consolidate":
+		return c.consolidateCmd(ctx, rest)
 	case "export":
 		return c.export(ctx, rest)
 	case "import":

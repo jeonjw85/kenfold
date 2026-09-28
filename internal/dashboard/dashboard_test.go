@@ -40,7 +40,8 @@ func TestPagesRender(t *testing.T) {
 		"clients.html": clientsData{Keys: []apikey.Key{{ID: "k", Agent: "codex", Prefix: "kf_abc", CreatedAt: now}},
 			Grants: []oauth.Grant{{ID: "g", ClientID: "https://chatgpt.com/c", ClientName: "ChatGPT", Agent: "chatgpt", Scopes: []string{"memory:read"}, CreatedAt: now}}},
 		"consolidation.html": []Proposal{{ID: "p1", Kind: "conflict", Scope: m.Scope, Keep: other.ID, Reason: "newer decision", Model: "m", Members: []store.Memory{m, other}, CreatedAt: now},
-			{ID: "p2", Kind: "merge", Scope: m.Scope, Content: "merged", Members: []store.Memory{m, other}, CreatedAt: now}},
+			{ID: "p2", Kind: "duplicate", Scope: m.Scope, Keep: m.ID, Members: []store.Memory{m, other}, CreatedAt: now},
+			{ID: "p3", Kind: "digest", Scope: m.Scope, Content: "Digest of 2 sessions", Members: []store.Memory{m, other}, CreatedAt: now}},
 		"message.html": nil,
 	}
 	for name, t2 := range pages {
