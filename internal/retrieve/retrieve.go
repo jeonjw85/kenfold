@@ -113,9 +113,11 @@ type Retriever struct {
 // Query is a search request.
 type Query struct {
 	Text  string
-	Scope string        // project/repo scope searched in addition to 'user'
-	Types []memory.Type // empty = all
-	Limit int           // default 10, max 50
+	Scope string // project/repo scope searched in addition to 'user'
+	// AllScopes searches every scope (the owner's dashboard); Scope is ignored.
+	AllScopes bool
+	Types     []memory.Type // empty = all
+	Limit     int           // default 10, max 50
 }
 
 type candidate struct {
@@ -137,7 +139,7 @@ func (r *Retriever) Search(ctx context.Context, q Query) ([]store.Scored, error)
 	pool := cmp.Or(o.Pool, defaultPool)
 	pool = max(pool, limit)
 
-	p := store.SearchParams{Query: q.Text, Scope: q.Scope, Types: q.Types, Limit: pool, MaxDistance: o.MaxDistance}
+	p := store.SearchParams{Query: q.Text, Scope: q.Scope, AllScopes: q.AllScopes, Types: q.Types, Limit: pool, MaxDistance: o.MaxDistance}
 	if vec := r.embed(ctx, q.Text); vec != nil {
 		p.Vector, p.Model = vec, r.Embedder.Model()
 	}
@@ -207,6 +209,9 @@ func (r *Retriever) expand(ctx context.Context, q Query, cands []*candidate, byI
 	scopes := []string{"user"}
 	if q.Scope != "" && q.Scope != "user" {
 		scopes = append(scopes, q.Scope)
+	}
+	if q.AllScopes {
+		scopes = nil
 	}
 	nbrs, err := r.Store.Neighbors(ctx, store.NeighborParams{Seeds: seeds, Scopes: scopes, Types: q.Types})
 	if err != nil {

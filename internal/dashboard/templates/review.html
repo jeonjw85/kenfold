@@ -1,0 +1,53 @@
+{{define "content"}}
+<h1>Review</h1>
+<p class="muted">Proposed memories are not served to agents until you approve them. Extracted memories show the quote they came from; check it, since instructions hidden in pasted text can end up here.</p>
+{{with .Data}}
+{{if .Scopes}}
+<form method="get" action="/dashboard/review" class="filters">
+  <label for="scope">Scope</label>
+  <select id="scope" name="scope">
+    <option value="">All scopes</option>
+    {{range .Scopes}}<option value="{{.Scope}}"{{if eq .Scope $.Data.Scope}} selected{{end}}>{{scopeLabel .Scope}} ({{.Proposed}})</option>{{end}}
+  </select>
+  <button type="submit" class="secondary">Filter</button>
+</form>
+{{end}}
+{{if not .Items}}<p class="empty">Nothing to review.</p>{{end}}
+{{range .Items}}{{$m := .Memory}}
+<article class="item" aria-labelledby="m-{{$m.ID}}">
+  <p class="meta">{{template "badges" $m}}</p>
+  <p class="content" id="m-{{$m.ID}}">{{$m.Content}}</p>
+  <p class="meta">{{template "provenance" $m}}{{if eq $m.SourceAgent "kenfold-extractor"}} · confidence {{pct $m.Confidence}}{{end}} · <a href="/dashboard/memories/{{$m.ID}}">details</a></p>
+  {{with attr $m.Attrs "evidence"}}<blockquote><span class="sr">Evidence: </span>{{.}}</blockquote>{{end}}
+  {{if .Similar}}
+  <div class="similar">
+    <h3>Similar memories already active</h3>
+    <ul>
+    {{range .Similar}}
+      <li><span>{{trunc .Content 300}}</span> <span class="meta">({{.SourceAgent}}, {{ts .CreatedAt}})</span>
+        <form method="post" action="/dashboard/review/{{$m.ID}}/replace" class="inline">
+          {{template "csrf" $}}<input type="hidden" name="target" value="{{.ID}}">
+          <button type="submit" class="secondary">Approve, replacing this one</button>
+        </form>
+      </li>
+    {{end}}
+    </ul>
+  </div>
+  {{end}}
+  <div class="actions">
+    <form method="post" action="/dashboard/review/{{$m.ID}}/approve" class="inline">{{template "csrf" $}}<button type="submit">Approve</button></form>
+    <form method="post" action="/dashboard/review/{{$m.ID}}/reject" class="inline">
+      {{template "csrf" $}}
+      <label for="reason-{{$m.ID}}" class="sr">Reason for rejecting</label>
+      <input type="text" id="reason-{{$m.ID}}" name="reason" placeholder="reason (optional)" maxlength="500">
+      <button type="submit" class="danger">Reject</button>
+    </form>
+  </div>
+</article>
+{{end}}
+<nav class="pager" aria-label="Pages">
+  {{if gt .Page 1}}<a href="/dashboard/review?scope={{.Scope}}&amp;page={{add .Page -1}}">Previous</a>{{end}}
+  {{if .More}}<a href="/dashboard/review?scope={{.Scope}}&amp;page={{add .Page 1}}">Next</a>{{end}}
+</nav>
+{{end}}
+{{end}}

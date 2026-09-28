@@ -19,7 +19,7 @@ Existing projects already cover "shared memory over MCP" (memorix, mcp-memory-se
 
 ### Language: Go
 
-The ML-heavy parts (embedding, extraction, reranking) are HTTP calls to model providers, so Python's ecosystem advantage does not apply. Go gives a single static binary (easy `brew install`, 25 MB distroless image), low idle footprint for an always-on server, and an official MCP SDK (`modelcontextprotocol/go-sdk`) that supports the stateless 2026-07-28 protocol revision. A future web dashboard may use TypeScript.
+The ML-heavy parts (embedding, extraction, reranking) are HTTP calls to model providers, so Python's ecosystem advantage does not apply. Go gives a single static binary (easy `brew install`, 25 MB distroless image), low idle footprint for an always-on server, and an official MCP SDK (`modelcontextprotocol/go-sdk`) that supports the stateless 2026-07-28 protocol revision. The owner's web dashboard (Phase 5) is rendered by the same binary with Go templates and no JavaScript, so there is no second toolchain or build step.
 
 Known cost: tree-sitter (Phase 3 code indexing) requires cgo, which complicates cross-compilation. Resolved in Phase 3 with a pure-Go tree-sitter runtime (see [ADR-0002](0002-retrieval-and-code-refs.md)).
 
@@ -67,6 +67,7 @@ Constraints enforce the invariants that must never be violated by any writer: va
 - `/mcp` enforces a Host allowlist (DNS-rebinding defense) and rejects cross-origin browser requests. The SDK's built-in rebinding check only applies to connections arriving on a loopback address, which is not the case behind Docker port publishing, so Kenfold enforces its own.
 - Auth: API keys since Phase 1 (one per agent; only a SHA-256 hash is stored; the key, not the client's self-reported name, determines `source_agent`). Since Phase 4, a built-in OAuth 2.1 authorization server for remote clients such as ChatGPT: the owner approves each client on a password-protected consent page, read-only or read and write, and names the agent its writes are attributed to.
 - Secret filter on writes since Phase 2: `remember` and `handoff` reject content with credentials, hooks redact captured text locally before it is written to disk, and `kenfold scan --redact` cleans memories stored earlier. Memory is rendered to agents as data, and `trust = external` content is never auto-promoted.
+- The owner's dashboard (`/dashboard/`, Phase 5) answers only for loopback host names and refuses requests that carry proxy forwarding headers, so a public URL or a tunnel does not expose it unless `KENFOLD_DASHBOARD=remote`. Login uses the owner password with the consent page's lockout. Sessions are held in memory (2 hours idle, 12 hours at most) and end when the password changes. Every change is a POST with a CSRF token and cross-origin protection, under a content security policy that allows no scripts. New API keys are still created only on the server.
 
 ### Defaults chosen
 
@@ -84,10 +85,10 @@ Constraints enforce the invariants that must never be violated by any writer: va
 | 2b | Model-based extraction of memories from session summaries (proposed for review by default) and type classification, with a local chat model (default `qwen3.5:4b`) | extracted memories measured on an internal eval set (dev + holdout; see `internal/extract/testdata/RESULTS.md`) |
 | 3 | Graph expansion, recency and staleness signals, rerank, code references with commit-based invalidation (tree-sitter symbols), REST API; see [ADR-0002](0002-retrieval-and-code-refs.md) | recall@5 ≥ 0.90 dev / ≥ 0.85 holdout on the internal eval set, never below the hybrid baseline |
 | 4 | OAuth 2.1 authorization server, remote deployment behind a tunnel or TLS proxy; object storage and an OpenAI-compatible proxy deferred (see [ADR-0003](0003-remote-access-and-oauth.md)) | recall works from ChatGPT. Verified with the MCP SDK's OAuth client over HTTPS and against ChatGPT's published client metadata; a real ChatGPT connection awaits a public deployment |
-| 5 | Export/import (done: JSON Lines archive without embeddings or credentials), consolidation workers, review dashboard, LongMemEval/LoCoMo evals | ongoing |
+| 5 | Export/import (done: JSON Lines archive without embeddings or credentials), review dashboard (done: server-rendered, local-only by default), consolidation workers, LongMemEval/LoCoMo evals | ongoing |
 
 ## Consequences
 
 - Postgres is a hard dependency even for a single user. Accepted: it is what makes transactions over memory + graph + vectors possible. An embedded mode (e.g. SQLite) may be considered later for zero-setup installs.
 - A fixed embedding dimension makes changing to a model of a different size a deliberate migration; same-size model changes only re-embed.
-- MCP is the primary contract. A REST API (`/api/v1`, since Phase 3) serves non-MCP clients with the same protections and keys; the dashboard will use it too.
+- MCP is the primary contract. A REST API (`/api/v1`, since Phase 3) serves non-MCP clients with the same protections and keys. The dashboard does not go through it: it runs in the same process and authenticates the owner by password, not by API key.

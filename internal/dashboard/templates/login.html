@@ -1,0 +1,16 @@
+{{define "content"}}
+<section class="login">
+<h1>Log in</h1>
+{{if .Data.NoPassword}}
+<p>No owner password is set yet. On the server, run:</p>
+<pre><code>docker compose exec kenfold /usr/local/bin/kenfold password</code></pre>
+{{end}}
+<form method="post" action="/dashboard/login">
+  <input type="hidden" name="next" value="{{.Data.Next}}">
+  <label for="password">Owner password</label>
+  <input type="password" id="password" name="password" required autocomplete="current-password" autofocus>
+  <button type="submit">Log in</button>
+</form>
+<p class="muted">The same password approves OAuth clients. After five wrong attempts, logging in is locked for 15 minutes.</p>
+</section>
+{{end}}

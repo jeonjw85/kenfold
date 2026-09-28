@@ -48,7 +48,7 @@ Usage:
   kenfold extract status               progress of memory extraction from session summaries
   kenfold extract run [--limit N]      extract memories now (needs KENFOLD_CHAT_URL)
 
-  kenfold oauth password               set the owner password asked for on the OAuth consent page
+  kenfold password                     set the owner password (dashboard login, OAuth consent page)
   kenfold oauth clients [--all]        OAuth clients the owner approved (ChatGPT, claude.ai, ...)
   kenfold oauth revoke <grant-id>      revoke a client's access and its tokens
 
@@ -78,6 +78,7 @@ Environment:
                                (its host is allowed; enables OAuth)
   KENFOLD_OAUTH                built-in OAuth authorization server (default: on with KENFOLD_PUBLIC_URL)
   KENFOLD_OAUTH_DCR            dynamic client registration  (default true)
+  KENFOLD_DASHBOARD            local | remote | off: where /dashboard/ answers (default local: loopback hosts only)
   KENFOLD_AUTH                 apikey | none              (default apikey)
   KENFOLD_AGENT                agent name for stdio sessions, e.g. claude-code
   KENFOLD_EMBED_URL            OpenAI-compatible embeddings base URL, e.g. http://127.0.0.1:11434/v1
@@ -196,6 +197,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdin i
 		return c.refs(ctx, rest)
 	case "oauth":
 		return c.oauthCmd(ctx, rest)
+	case "password":
+		return c.oauthPassword(ctx, rest)
 	case "export":
 		return c.export(ctx, rest)
 	case "import":

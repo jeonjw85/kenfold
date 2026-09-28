@@ -47,7 +47,7 @@ func TestOwnerLockoutIntegration(t *testing.T) {
 		t.Fatalf("right password: %v", err)
 	}
 	for i := 1; i < maxFailedLogins; i++ {
-		if err := s.CheckOwner(ctx, "wrong password here"); !errors.Is(err, errInvalid) {
+		if err := s.CheckOwner(ctx, "wrong password here"); !errors.Is(err, ErrWrongPassword) {
 			t.Fatalf("attempt %d: %v", i, err)
 		}
 		var n int
@@ -55,7 +55,7 @@ func TestOwnerLockoutIntegration(t *testing.T) {
 			t.Fatalf("failed_attempts after %d failures = %d, %v", i, n, err)
 		}
 	}
-	if err := s.CheckOwner(ctx, "wrong password here"); !errors.Is(err, errInvalid) {
+	if err := s.CheckOwner(ctx, "wrong password here"); !errors.Is(err, ErrWrongPassword) {
 		t.Fatalf("last failure: %v", err)
 	}
 	if err := s.CheckOwner(ctx, pw); !errors.Is(err, errLocked) {

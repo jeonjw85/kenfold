@@ -17,17 +17,27 @@ Setting `KENFOLD_PUBLIC_URL` adds its host to the Host allowlist and turns on th
 
 The public URL leads to your whole memory store. Everything is authenticated, but check the following first:
 
-1. **Set the owner password.** OAuth clients can only be approved on the consent page with it. Use a unique password of at least 12 characters (a password manager's is best):
+1. **Set the owner password.** It approves OAuth clients on the consent page and logs you in to the [dashboard](#the-dashboard-stays-local). Use a unique password of at least 12 characters (a password manager's is best):
 
    ```sh
-   docker compose exec kenfold /usr/local/bin/kenfold oauth password
+   docker compose exec kenfold /usr/local/bin/kenfold password
    ```
 
-   After five wrong attempts the consent page locks for 15 minutes. Repeated wrong-password or lockout lines in `make logs` mean someone is guessing.
+   After five wrong attempts the consent page and the dashboard login lock for 15 minutes. Repeated wrong-password or lockout lines in `make logs` mean someone is guessing.
 2. **Keep `KENFOLD_AUTH=apikey`** (the default). OAuth refuses to start without it.
 3. **Give each client the least access it needs.** The consent page preselects read-only; choose "read and write" only for clients that should store memories. With write access, a client can change what your other agents are told.
 4. **Approve only connections you started.** The consent page shows the client's id and the host you are sent back to after approval (for ChatGPT, `chatgpt.com`; for claude.ai, `claude.ai`). Deny if either is unexpected: anyone can name a client "ChatGPT" and send you a link.
 5. **Back up the database** (the `pgdata` volume) if losing memories would hurt.
+
+## The dashboard stays local
+
+Setting `KENFOLD_PUBLIC_URL` does not publish the dashboard. `/dashboard/` answers only for `localhost` and loopback addresses, and it refuses requests that carry proxy headers such as `X-Forwarded-For`, so it is not reachable through the public URL or through a tunnel that rewrites the `Host` header. To use it from another machine, forward the port over SSH and open `http://127.0.0.1:7077/dashboard/`:
+
+```sh
+ssh -L 7077:127.0.0.1:7077 your-server
+```
+
+`KENFOLD_DASHBOARD=remote` also serves the dashboard on the public URL's host. Then only the owner password stands between the internet and your memory, including the power to revoke clients and forget memories. Prefer a URL only you can reach (`tailscale serve`, or an access policy in front of the tunnel). `KENFOLD_DASHBOARD=off` turns the dashboard off.
 
 ## Option A: Tailscale Funnel
 
@@ -119,8 +129,10 @@ Agents with API keys use the public URL instead of `http://127.0.0.1:7077/mcp`. 
 ```sh
 docker compose exec kenfold /usr/local/bin/kenfold oauth clients         # approved clients, access, last use
 docker compose exec kenfold /usr/local/bin/kenfold oauth revoke <grant>  # cut one off (its tokens stop working immediately)
-docker compose exec kenfold /usr/local/bin/kenfold oauth password        # change the owner password
+docker compose exec kenfold /usr/local/bin/kenfold password              # change the owner password (ends dashboard sessions)
 ```
+
+The dashboard's Clients page (`/dashboard/clients`) lists and revokes OAuth clients and API keys as well.
 
 - **Token lifetimes.** Access tokens last an hour and refresh tokens 30 days. A refresh token works once: presenting a used one revokes the client's grant, because it means someone else has a copy.
 - **Changing `KENFOLD_PUBLIC_URL`** invalidates all OAuth tokens, since they are bound to it. Clients have to connect again.

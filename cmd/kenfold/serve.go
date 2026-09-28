@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/kenfold/kenfold/internal/chat"
 	"github.com/kenfold/kenfold/internal/coderef"
 	"github.com/kenfold/kenfold/internal/config"
+	"github.com/kenfold/kenfold/internal/dashboard"
 	"github.com/kenfold/kenfold/internal/embed"
 	"github.com/kenfold/kenfold/internal/extract"
 	"github.com/kenfold/kenfold/internal/httpserver"
@@ -154,6 +157,19 @@ func httpHandler(cfg config.Config, rt *runtime, logger *slog.Logger) http.Handl
 	if cfg.Auth == config.AuthAPIKey {
 		opts.Verifier = rt.keys.TokenVerifier(logger)
 	}
+	if cfg.Dashboard != config.DashboardOff {
+		d, err := dashboard.New(dashboard.Deps{
+			Store: rt.store, Keys: rt.keys, Owner: rt.oauthDB, Logger: logger, Version: buildinfo.Version,
+			Retriever: &retrieve.Retriever{Store: rt.store, Embedder: rt.embedderIface(), Reranker: rt.rerankerIface(), Logger: logger,
+				Options: retrieve.Options{MaxDistance: cfg.SearchMaxDistance}},
+			Remote:     cfg.Dashboard == config.DashboardRemote,
+			PublicHost: publicHost(cfg.PublicURL),
+		})
+		if err != nil {
+			panic(err) // embedded templates: a parse error is a build defect
+		}
+		opts.Dashboard = d
+	}
 	if rt.oauth != nil {
 		rt.oauth.SetLogger(logger)
 		keys, tokens := opts.Verifier, rt.oauth
@@ -229,7 +245,7 @@ func (c *cli) serve(ctx context.Context) error {
 		case err != nil:
 			c.logger.Warn("could not check the OAuth owner password", "err", err)
 		case !set:
-			c.logger.Warn("OAuth is enabled but no owner password is set, so no client can be approved; set one with: kenfold oauth password")
+			c.logger.Warn("OAuth is enabled but no owner password is set, so no client can be approved; set one with: kenfold password")
 		}
 		c.logger.Info("oauth enabled", "issuer", c.cfg.PublicURL, "resource", rt.oauth.Resource(), "dynamic_registration", c.cfg.OAuthDCR)
 		wg.Go(func() { oauthPruneLoop(bgCtx, rt.oauthDB, c.logger, time.Hour) })
@@ -436,4 +452,13 @@ func oauthPruneLoop(ctx context.Context, st *oauth.Store, logger *slog.Logger, e
 		case <-t.C:
 		}
 	}
+}
+
+// publicHost returns the host name of the public URL ("" when unset).
+func publicHost(u string) string {
+	p, err := url.Parse(u)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(p.Hostname())
 }

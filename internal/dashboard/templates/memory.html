@@ -1,0 +1,49 @@
+{{define "content"}}
+{{with .Data}}{{$m := .Memory}}
+<p class="meta">{{template "badges" $m}}{{if stale .Refs}} <span class="badge stale">code changed</span>{{end}}</p>
+<h1 class="content">{{$m.Content}}</h1>
+<dl class="facts">
+  <dt>Written</dt><dd>{{template "provenance" $m}}</dd>
+  <dt>Trust</dt><dd>{{$m.Trust}}{{if $m.SourceSession}} · session <code>{{deref $m.SourceSession}}</code>{{end}}</dd>
+  <dt>Updated</dt><dd>{{ts $m.UpdatedAt}}</dd>
+  {{if $m.ExpiresAt}}<dt>Expires</dt><dd>{{tsp $m.ExpiresAt}}</dd>{{end}}
+  <dt>Id</dt><dd><code>{{$m.ID}}</code></dd>
+</dl>
+{{with $m.Attrs}}{{with .evidence}}<h2>Evidence</h2><blockquote>{{.}}</blockquote>{{end}}{{end}}
+
+{{if .Refs}}
+<h2>Code it refers to</h2>
+<table>
+<thead><tr><th scope="col">File</th><th scope="col">Symbol</th><th scope="col">State</th><th scope="col">Checked at</th></tr></thead>
+<tbody>{{range .Refs}}<tr><td><code>{{if .Path}}{{.Path}}{{else}}{{deref .ResolvedPath}}{{end}}</code></td><td>{{if .Symbol}}<code>{{.Symbol}}</code>{{end}}</td><td><span class="state-{{.State}}">{{.State}}</span></td><td>{{with .CheckedCommit}}<code>{{short .}}</code>{{end}}</td></tr>{{end}}</tbody>
+</table>
+{{end}}
+
+{{if .History}}
+<h2>Versions</h2>
+<ol class="history">{{range .History}}<li>{{if eq .ID $m.ID}}<strong>this version</strong>{{else}}<a href="/dashboard/memories/{{.ID}}">{{trunc .Content 200}}</a>{{end}} <span class="meta">({{.Status}}, {{.SourceAgent}}, {{ts .CreatedAt}})</span></li>{{end}}</ol>
+{{end}}
+
+{{if .Links}}
+<h2>Linked memories</h2>
+<ul>{{range .Links}}<li><span class="meta">{{if .Outgoing}}{{.Relation}} →{{else}}← {{.Relation}}{{end}}</span> <a href="/dashboard/memories/{{.Memory.ID}}">{{trunc .Memory.Content 200}}</a> <span class="meta">({{.Memory.Type}}, {{.Memory.Status}})</span></li>{{end}}</ul>
+{{end}}
+
+{{if .Attrs}}
+<details><summary>All attributes</summary>
+<table><tbody>{{range $k, $v := .Attrs}}<tr><th scope="row">{{$k}}</th><td><code class="wrap">{{$v}}</code></td></tr>{{end}}</tbody></table>
+</details>
+{{end}}
+
+<h2>Actions</h2>
+<div class="actions">
+{{if eq $m.Status "proposed"}}
+  <form method="post" action="/dashboard/review/{{$m.ID}}/approve" class="inline">{{template "csrf" $}}<button type="submit">Approve</button></form>
+  {{range .Similar}}<form method="post" action="/dashboard/review/{{$m.ID}}/replace" class="inline">{{template "csrf" $}}<input type="hidden" name="target" value="{{.ID}}"><button type="submit" class="secondary">Approve, replacing “{{trunc .Content 60}}”</button></form>{{end}}
+  <form method="post" action="/dashboard/review/{{$m.ID}}/reject" class="inline">{{template "csrf" $}}<label for="reason" class="sr">Reason</label><input type="text" id="reason" name="reason" placeholder="reason (optional)" maxlength="500"><button type="submit" class="danger">Reject</button></form>
+{{else if eq $m.Status "active"}}
+  <form method="post" action="/dashboard/memories/{{$m.ID}}/forget" class="inline">{{template "csrf" $}}<label for="reason" class="sr">Reason</label><input type="text" id="reason" name="reason" placeholder="why it is wrong or outdated" maxlength="500"><button type="submit" class="danger">Forget</button></form>
+{{else}}<p class="muted">This memory is {{$m.Status}}; it is kept as history and not served.</p>{{end}}
+</div>
+{{end}}
+{{end}}

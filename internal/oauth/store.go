@@ -2,6 +2,8 @@ package oauth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,12 +25,21 @@ const (
 )
 
 var (
-	errNotFound   = errors.New("not found")
-	errInvalid    = errors.New("invalid, expired, or already used")
-	errReuse      = errors.New("refresh token reuse")
-	errLocked     = errors.New("too many failed attempts")
-	errNoPassword = errors.New("no owner password is set")
+	errNotFound = errors.New("not found")
+	errInvalid  = errors.New("invalid, expired, or already used")
+	errReuse    = errors.New("refresh token reuse")
+
+	// Owner password checks (the OAuth consent page and the dashboard login).
+	ErrWrongPassword = errors.New("wrong owner password")
+	ErrOwnerLocked   = errors.New("too many failed attempts; try again in 15 minutes")
+	ErrNoPassword    = errors.New("no owner password is set; run: kenfold password")
+
+	errLocked     = ErrOwnerLocked
+	errNoPassword = ErrNoPassword
 )
+
+// ownerChecks bounds concurrent password checks: each Argon2id run uses 64 MiB.
+var ownerChecks = make(chan struct{}, 2)
 
 // Store persists OAuth state.
 type Store struct {
@@ -64,6 +75,12 @@ func (s *Store) OwnerPasswordSet(ctx context.Context) (bool, error) {
 // the check refuses (errLocked) for lockoutPeriod, even for the right
 // password. The row is locked so concurrent attempts are counted.
 func (s *Store) CheckOwner(ctx context.Context, password string) error {
+	select {
+	case ownerChecks <- struct{}{}:
+		defer func() { <-ownerChecks }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	// The failure count must be committed, so a wrong password is reported
 	// after the transaction, not by returning an error from it (which would
 	// roll the count back).
@@ -103,9 +120,24 @@ func (s *Store) CheckOwner(ctx context.Context, password string) error {
 		return err
 	})
 	if err == nil && wrong {
-		return errInvalid
+		return ErrWrongPassword
 	}
 	return err
+}
+
+// OwnerStamp identifies the current owner password (a digest of its hash),
+// so sessions opened with an old password can be ended when it changes.
+func (s *Store) OwnerStamp(ctx context.Context) (string, error) {
+	var h string
+	err := s.pool.QueryRow(ctx, `SELECT password_hash FROM oauth_owner WHERE id = 1`).Scan(&h)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNoPassword
+	}
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(h))
+	return hex.EncodeToString(sum[:8]), nil
 }
 
 // ---- clients ----

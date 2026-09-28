@@ -42,7 +42,14 @@ type Options struct {
 	// ResourceMetadataURL is advertised in WWW-Authenticate challenges on
 	// /mcp and the API so OAuth clients can discover the authorization server.
 	ResourceMetadataURL string
+	// Dashboard, if set, is served under DashboardPrefix behind the Host
+	// allowlist. It authenticates the owner itself (password and session)
+	// instead of bearer tokens.
+	Dashboard http.Handler
 }
+
+// DashboardPrefix is where Options.Dashboard is mounted.
+const DashboardPrefix = "/dashboard/"
 
 // APIPrefix is where Options.API is mounted.
 const APIPrefix = "/api/"
@@ -104,6 +111,10 @@ func New(mcpServer *mcp.Server, db Pinger, logger *slog.Logger, opts Options) ht
 	mux.Handle(MCPPath, protect(mcpHandler))
 	if opts.API != nil {
 		mux.Handle(APIPrefix, protect(opts.API))
+	}
+	if opts.Dashboard != nil {
+		mux.Handle(DashboardPrefix, requireHost(opts.AllowedHosts, opts.Dashboard))
+		mux.Handle("GET /dashboard", http.RedirectHandler(DashboardPrefix, http.StatusMovedPermanently))
 	}
 	if opts.OAuth != nil {
 		oauthMux := http.NewServeMux()

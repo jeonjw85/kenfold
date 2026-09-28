@@ -39,7 +39,7 @@ func (c *cli) oauthCmd(ctx context.Context, args []string) error {
 // as `docker compose exec -T kenfold kenfold oauth password < file`.
 func (c *cli) oauthPassword(ctx context.Context, args []string) error {
 	if len(args) != 0 {
-		return usageErr("oauth password takes no arguments (it reads the password from the terminal or stdin)")
+		return usageErr("password takes no arguments (it reads the password from the terminal or stdin)")
 	}
 	pw, err := readPassword(c.in, c.errOut)
 	if err != nil {
@@ -53,7 +53,7 @@ func (c *cli) oauthPassword(ctx context.Context, args []string) error {
 	if err := rt.oauthDB.SetOwnerPassword(ctx, pw); err != nil {
 		return err
 	}
-	fmt.Fprintln(c.out, "Owner password set. It is asked for on the consent page whenever a client connects over OAuth.")
+	fmt.Fprintln(c.out, "Owner password set. It logs you in to the dashboard (/dashboard/) and approves OAuth clients; open dashboard sessions have ended.")
 	return nil
 }
 

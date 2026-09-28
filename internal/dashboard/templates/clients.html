@@ -1,0 +1,28 @@
+{{define "content"}}
+<h1>Clients</h1>
+{{with .Data}}
+<h2>OAuth clients</h2>
+{{if .Grants}}
+<table>
+<thead><tr><th scope="col">Client</th><th scope="col">Agent</th><th scope="col">Access</th><th scope="col">Approved</th><th scope="col">Last used</th><th scope="col"><span class="sr">Actions</span></th></tr></thead>
+<tbody>{{range .Grants}}<tr>
+  <td>{{if .ClientName}}{{.ClientName}}{{else}}<code>{{trunc .ClientID 40}}</code>{{end}}</td><td>{{.Agent}}</td>
+  <td>{{if eq (len .Scopes) 1}}read{{else}}read and write{{end}}</td><td>{{ts .CreatedAt}}</td><td>{{tsp .LastUsedAt}}</td>
+  <td><form method="post" action="/dashboard/clients/grants/{{.ID}}/revoke" class="inline">{{template "csrf" $}}<button type="submit" class="danger" aria-label="Revoke {{.Agent}}">Revoke</button></form></td>
+</tr>{{end}}</tbody>
+</table>
+{{else}}<p class="muted">No OAuth clients. They appear here after you approve one on the consent page (see docs/deploy.md).</p>{{end}}
+
+<h2>API keys</h2>
+{{if .Keys}}
+<table>
+<thead><tr><th scope="col">Agent</th><th scope="col">Key</th><th scope="col">Created</th><th scope="col">Last used</th><th scope="col"><span class="sr">Actions</span></th></tr></thead>
+<tbody>{{range .Keys}}<tr>
+  <td>{{.Agent}}</td><td><code>{{.Prefix}}…</code></td><td>{{ts .CreatedAt}}</td><td>{{tsp .LastUsedAt}}</td>
+  <td><form method="post" action="/dashboard/clients/keys/{{.ID}}/revoke" class="inline">{{template "csrf" $}}<button type="submit" class="danger" aria-label="Revoke the key of {{.Agent}}">Revoke</button></form></td>
+</tr>{{end}}</tbody>
+</table>
+{{else}}<p class="muted">No API keys.</p>{{end}}
+<p class="muted">New keys are created on the server (<code>make key AGENT=codex</code>), so a stolen dashboard session cannot mint credentials.</p>
+{{end}}
+{{end}}

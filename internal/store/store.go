@@ -388,6 +388,10 @@ type ListParams struct {
 	Limit    int
 	// Stale keeps only memories with a stale code reference (see CodeRef.Stale).
 	Stale bool
+	// Offset skips that many rows (pagination; at most 100000).
+	Offset int
+	// OldestFirst orders by creation time ascending (review queues).
+	OldestFirst bool
 }
 
 // List returns unexpired memories matching p, newest first.
@@ -406,9 +410,9 @@ func (s *Store) List(ctx context.Context, p ListParams) ([]Memory, error) {
 		  AND (NOT $5 OR EXISTS (
 		      SELECT 1 FROM memory_ref r WHERE r.memory_id = memory.id
 		        AND (r.state = 'missing' OR (r.state = 'changed' AND r.symbol <> ''))))
-		ORDER BY created_at DESC, id DESC
-		LIMIT $4`,
-		stringsOf(statuses), nilIfEmpty(p.Scopes), stringsOf(p.Types), limit, p.Stale)
+		ORDER BY CASE WHEN $7 THEN created_at END ASC, CASE WHEN $7 THEN id END ASC, created_at DESC, id DESC
+		LIMIT $4 OFFSET $6`,
+		stringsOf(statuses), nilIfEmpty(p.Scopes), stringsOf(p.Types), limit, p.Stale, min(max(p.Offset, 0), 100000), p.OldestFirst)
 	if err != nil {
 		return nil, fmt.Errorf("list: %w", err)
 	}
@@ -424,10 +428,12 @@ const DefaultMaxDistance = 0.55
 
 // SearchParams controls Search.
 type SearchParams struct {
-	Query string        // natural-language query
-	Scope string        // project/repo scope searched in addition to 'user'; empty = user only
-	Types []memory.Type // empty = all types
-	Limit int           // default 10, max 50
+	Query string // natural-language query
+	Scope string // project/repo scope searched in addition to 'user'; empty = user only
+	// AllScopes searches every scope (the owner's dashboard); Scope is ignored.
+	AllScopes bool
+	Types     []memory.Type // empty = all types
+	Limit     int           // default 10, max 50
 
 	// Vector is the query embedding (optional). Only memories embedded with the
 	// same Model are compared.
@@ -450,6 +456,9 @@ func (s *Store) Search(ctx context.Context, p SearchParams) ([]Scored, error) {
 	scopes := []string{"user"}
 	if p.Scope != "" && p.Scope != "user" {
 		scopes = append(scopes, p.Scope)
+	}
+	if p.AllScopes {
+		scopes = nil
 	}
 	vec, err := vectorParam(p.Vector)
 	if err != nil {
@@ -905,7 +914,7 @@ var searchSQL = fmt.Sprintf(`
 	    FROM memory m, q
 	    WHERE m.status = 'active'
 	      AND (m.expires_at IS NULL OR m.expires_at > now())
-	      AND m.scope = ANY($2)
+	      AND ($2::text[] IS NULL OR m.scope = ANY($2))
 	      AND ($3::text[] IS NULL OR m.type = ANY($3))
 	      AND m.content_tsv @@ q.tsq
 	    ORDER BY rnk
@@ -919,7 +928,7 @@ var searchSQL = fmt.Sprintf(`
 	      AND m.embedding_model = $7
 	      AND m.status = 'active'
 	      AND (m.expires_at IS NULL OR m.expires_at > now())
-	      AND m.scope = ANY($2)
+	      AND ($2::text[] IS NULL OR m.scope = ANY($2))
 	      AND ($3::text[] IS NULL OR m.type = ANY($3))
 	    ORDER BY m.embedding <=> $6::text::vector
 	    LIMIT $5

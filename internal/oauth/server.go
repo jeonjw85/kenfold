@@ -70,9 +70,8 @@ type Server struct {
 	fetcher  *CIMDFetcher
 	log      *slog.Logger
 	csrfKey  []byte
-	sem      chan struct{} // bounds concurrent password checks (Argon2 uses 64 MiB each)
-	jwks     jwksCache     // private_key_jwt clients' key sets
-	replay   replayCache   // jti of verified client assertions
+	jwks     jwksCache   // private_key_jwt clients' key sets
+	replay   replayCache // jti of verified client assertions
 }
 
 // New returns a Server. PublicURL must be an absolute http(s) URL.
@@ -95,7 +94,7 @@ func New(st *Store, cfg Config) (*Server, error) {
 	}
 	return &Server{
 		cfg: cfg, store: st, issuer: issuer, resource: issuer + cfg.MCPPath, fetcher: cfg.Fetcher, log: cfg.Logger,
-		csrfKey: []byte(randomString(32)), sem: make(chan struct{}, 2),
+		csrfKey: []byte(randomString(32)),
 	}, nil
 }
 
@@ -489,21 +488,15 @@ func (s *Server) decide(w http.ResponseWriter, r *http.Request) {
 		scopes = []string{authz.ScopeRead, authz.ScopeWrite}
 	}
 
-	select {
-	case s.sem <- struct{}{}:
-		defer func() { <-s.sem }()
-	case <-r.Context().Done():
-		return
-	}
 	switch err := s.store.CheckOwner(r.Context(), r.PostForm.Get("password")); {
 	case errors.Is(err, errNoPassword):
-		s.showConsent(w, req, "No owner password is set. On the server, run: kenfold oauth password", http.StatusForbidden)
+		s.showConsent(w, req, "No owner password is set. On the server, run: kenfold password", http.StatusForbidden)
 		return
 	case errors.Is(err, errLocked):
 		s.log.WarnContext(r.Context(), "oauth consent locked after failed password attempts")
 		s.showConsent(w, req, "Too many wrong passwords. Try again in 15 minutes.", http.StatusTooManyRequests)
 		return
-	case errors.Is(err, errInvalid):
+	case errors.Is(err, ErrWrongPassword):
 		s.log.WarnContext(r.Context(), "oauth consent: wrong owner password", "client_id", req.ClientID)
 		s.showConsent(w, req, "Wrong password.", http.StatusUnauthorized)
 		return

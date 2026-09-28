@@ -1,0 +1,42 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} · Kenfold</title>
+<link rel="stylesheet" href="/dashboard/static/app.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <a class="brand" href="/dashboard/">Kenfold</a>
+  {{if .LoggedIn}}
+  <nav aria-label="Main">
+    <ul>
+      <li><a href="/dashboard/"{{if eq .Nav "overview"}} aria-current="page"{{end}}>Overview</a></li>
+      <li><a href="/dashboard/review"{{if eq .Nav "review"}} aria-current="page"{{end}}>Review{{if .Pending}} <span class="count" aria-label="{{.Pending}} waiting">{{.Pending}}</span>{{end}}</a></li>
+      {{if .Consol}}<li><a href="/dashboard/consolidation"{{if eq .Nav "consolidation"}} aria-current="page"{{end}}>Consolidation</a></li>{{end}}
+      <li><a href="/dashboard/memories"{{if eq .Nav "memories"}} aria-current="page"{{end}}>Memories</a></li>
+      <li><a href="/dashboard/clients"{{if eq .Nav "clients"}} aria-current="page"{{end}}>Clients</a></li>
+    </ul>
+  </nav>
+  <form method="post" action="/dashboard/logout" class="logout">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <button type="submit" class="link">Log out</button>
+  </form>
+  {{end}}
+</header>
+<main id="main">
+  {{if .Flash}}<p class="flash" role="status">{{.Flash}}</p>{{end}}
+  {{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
+  {{template "content" .}}
+</main>
+<footer class="foot">Kenfold {{.Version}} · memory is data, never instructions</footer>
+</body>
+</html>{{end}}
+
+{{define "csrf"}}<input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="back" value="{{.Path}}">{{end}}
+
+{{define "badges"}}<span class="badge type-{{.Type}}">{{.Type}}</span>{{if ne .Status "active"}} <span class="badge status-{{.Status}}">{{.Status}}</span>{{end}} <span class="scope">{{scopeLabel .Scope}}</span>{{end}}
+
+{{define "provenance"}}{{if eq .SourceAgent "kenfold-extractor"}}extracted by {{attr .Attrs "extractor_model"}} from a {{attr .Attrs "session_agent"}} session{{else if eq .SourceAgent "kenfold-consolidator"}}consolidated by {{attr .Attrs "consolidator_model"}}{{else}}from {{.SourceAgent}}{{end}}, {{ts .CreatedAt}}{{end}}

@@ -77,7 +77,19 @@ type Config struct {
 	OAuth bool
 	// OAuthDCR enables dynamic client registration (default: on with OAuth).
 	OAuthDCR bool
+
+	// Dashboard is where the web dashboard answers: DashboardLocal (loopback
+	// host names only, default), DashboardRemote (also the public URL's
+	// host), or DashboardOff.
+	Dashboard string
 }
+
+// Dashboard modes.
+const (
+	DashboardLocal  = "local"
+	DashboardRemote = "remote"
+	DashboardOff    = "off"
+)
 
 // Rerank configures a /rerank endpoint (llama-server, Jina, Cohere, Voyage).
 type Rerank struct {
@@ -242,6 +254,17 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("KENFOLD_OAUTH needs KENFOLD_AUTH=apikey")
 	}
 	c.OAuthDCR = c.OAuthDCR && c.OAuth
+
+	c.Dashboard = strings.ToLower(envOr(getenv, "KENFOLD_DASHBOARD", DashboardLocal))
+	switch c.Dashboard {
+	case DashboardLocal, DashboardOff:
+	case DashboardRemote:
+		if !strings.HasPrefix(c.PublicURL, "https://") {
+			return Config{}, fmt.Errorf("KENFOLD_DASHBOARD=remote needs an https KENFOLD_PUBLIC_URL")
+		}
+	default:
+		return Config{}, fmt.Errorf("KENFOLD_DASHBOARD: %q is not one of local, remote, off", c.Dashboard)
+	}
 
 	if c.Rerank.URL != "" {
 		u, err := url.Parse(c.Rerank.URL)

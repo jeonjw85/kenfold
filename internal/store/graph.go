@@ -26,7 +26,7 @@ type Neighbor struct {
 // NeighborParams controls Neighbors.
 type NeighborParams struct {
 	Seeds  []string      // memory ids
-	Scopes []string      // only neighbors in these scopes
+	Scopes []string      // only neighbors in these scopes (nil = all)
 	Types  []memory.Type // empty = all
 	Limit  int           // default 50, max 200
 }
@@ -61,7 +61,7 @@ func (s *Store) Neighbors(ctx context.Context, p NeighborParams) ([]Neighbor, er
 		FROM adj a JOIN memory m ON m.id = a.id
 		WHERE m.status = 'active'
 		  AND (m.expires_at IS NULL OR m.expires_at > now())
-		  AND m.scope = ANY($2)
+		  AND ($2::text[] IS NULL OR m.scope = ANY($2))
 		  AND ($3::text[] IS NULL OR m.type = ANY($3))
 		  AND m.id <> ALL($1::uuid[])
 		ORDER BY m.created_at DESC, m.id

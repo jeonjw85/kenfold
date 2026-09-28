@@ -20,7 +20,7 @@ What makes it different (see [ADR-0001](docs/adr/0001-architecture.md)):
 - **Handoff** between agents: stop in Claude Code, resume in Codex
 - **Poisoning-aware**: memory is served as data, never as instructions; preferences need your approval
 
-> **Status: Phase 4.** Shared storage, hybrid search with **reranking, graph expansion, and recency**, API keys, setup for Claude Code, Codex, and OpenCode, a server-side **secret filter**, duplicate and contradiction hints, **session hooks** that load memory at session start and record a summary at session end, optional **model-based extraction** that turns session summaries into memories for your review, **code references** that flag memories whose code changed or disappeared, and **remote access** with a built-in OAuth server for ChatGPT, claude.ai, and agents on other machines.
+> **Status: Phase 5 in progress.** Shared storage, hybrid search with **reranking, graph expansion, and recency**, API keys, setup for Claude Code, Codex, and OpenCode, a server-side **secret filter**, duplicate and contradiction hints, **session hooks** that load memory at session start and record a summary at session end, optional **model-based extraction** that turns session summaries into memories for your review, **code references** that flag memories whose code changed or disappeared, and **remote access** with a built-in OAuth server for ChatGPT, claude.ai, and agents on other machines. Phase 5 has added **backups** (export and import) and a **review dashboard** in the browser.
 
 ## Quickstart
 
@@ -96,7 +96,7 @@ With `make up-embed`, also set `KENFOLD_EMBED_URL=http://127.0.0.1:11435/v1` for
 
 ```sh
 KENFOLD_PUBLIC_URL=https://kenfold.example.com make up
-docker compose exec kenfold /usr/local/bin/kenfold oauth password   # asked for when you approve a client
+docker compose exec kenfold /usr/local/bin/kenfold password   # the owner password: approves clients, logs in to the dashboard
 ```
 
 This turns on Kenfold's OAuth 2.1 server. ChatGPT and claude.ai find it on their own, and you approve each on a consent page, read-only or read and write. Agents with API keys use the public URL as before. See [docs/deploy.md](docs/deploy.md) for Tailscale Funnel, Cloudflare Tunnel, and Caddy, and read its checklist before exposing your memory to the internet.
@@ -132,7 +132,7 @@ make up-extract                # up-embed plus qwen3.5:4b (first run downloads ~
 make review                    # go through proposed memories: approve, reject, or replace an old one
 ```
 
-Extracted memories are `proposed`: nothing is served to agents until you approve it. Each one shows the quote it came from and any existing memory it resembles; approving with "replace" retires the old one. A memory you reject is not proposed again. The same model also picks the type of memories that agents store without one; this adds about 6 seconds to such a `remember` call on CPU, and if the model takes longer than 15 seconds (while it loads, or is busy extracting) the default type is used.
+Extracted memories are `proposed`: nothing is served to agents until you approve it, with `make review` or in the [dashboard](#dashboard). Each one shows the quote it came from and any existing memory it resembles; approving with "replace" retires the old one. A memory you reject is not proposed again. The same model also picks the type of memories that agents store without one; this adds about 6 seconds to such a `remember` call on CPU, and if the model takes longer than 15 seconds (while it loads, or is busy extracting) the default type is used.
 
 The model runs on CPU in Docker and takes 10–30 seconds per session, in the background. On CPUs with performance and efficiency cores, set `THREADS` to the number of performance cores (default 4; `make up-embed THREADS=6`): Ollama's default of one thread per core was 30–80× slower on an Apple M5, for embeddings as well as chat. Any OpenAI-compatible chat API works (`KENFOLD_CHAT_URL`, `KENFOLD_CHAT_MODEL`). Quality on the internal eval set is recorded in [internal/extract/testdata/RESULTS.md](internal/extract/testdata/RESULTS.md) (`make eval`).
 
@@ -178,6 +178,16 @@ bin/kenfold memory approve <id>
 bin/kenfold memory forget <id> --reason "outdated"
 ```
 
+## Dashboard
+
+Open http://127.0.0.1:7077/dashboard/ and log in with the owner password. Set it once with `docker compose exec kenfold /usr/local/bin/kenfold password`; the same password approves OAuth clients.
+
+- **Review**: proposed memories (extracted memories, and preferences agents stored), oldest first, with the quote each came from and similar active memories. Approve, reject, or approve and replace an old memory, which is kept as history.
+- **Memories**: search as agents see it, or list by scope, type, and status, including memories whose code changed. Each memory shows its provenance, versions, links, and code references, and can be forgotten.
+- **Clients**: API keys and OAuth clients with their last use; revoke them. New keys are created on the server only.
+
+The dashboard answers only on `localhost` and loopback addresses and refuses requests that came through a proxy or tunnel, so a public URL does not expose it (see [docs/deploy.md](docs/deploy.md#the-dashboard-stays-local) for SSH port forwarding and `KENFOLD_DASHBOARD=remote`). It runs no JavaScript, every change needs the session's CSRF token, and a session ends after 2 hours idle (12 hours at most), when the owner password changes, or when Kenfold restarts.
+
 ## Backup and moving to another server
 
 ```sh
@@ -220,7 +230,8 @@ Full contract: [docs/mcp-tools.md](docs/mcp-tools.md).
 
 - Ports are published on `127.0.0.1` only. Kenfold has no TLS of its own: expose it only through a tunnel or a TLS reverse proxy, with `KENFOLD_PUBLIC_URL` set (see [docs/deploy.md](docs/deploy.md)).
 - `/mcp` requires an API key (`KENFOLD_AUTH=apikey`, the default) or an OAuth access token. Only SHA-256 hashes of keys and tokens are stored. Revoke a key with `bin/kenfold key revoke <prefix>` and an OAuth client with `kenfold oauth revoke <grant>`.
-- Every key and approved OAuth client can read all memory (Kenfold has one owner). OAuth clients can be limited to read-only, and the consent page preselects read-only. It is protected by the owner password (Argon2id, locked for 15 minutes after five wrong attempts).
+- Every key and approved OAuth client can read all memory (Kenfold has one owner). OAuth clients can be limited to read-only, and the consent page preselects read-only. The consent page and the dashboard are protected by the owner password (Argon2id; five wrong attempts on either lock both for 15 minutes).
+- The dashboard answers only on loopback host names and refuses proxied requests unless `KENFOLD_DASHBOARD=remote`. Its content security policy allows no scripts or framing, and every change needs the session's CSRF token.
 - `/mcp` and the REST API (`/api/v1`, used by `kenfold refs sync` and the hook) enforce a Host allowlist (DNS rebinding) and reject cross-site browser requests. `/healthz` and `/readyz` are unauthenticated and expose no data.
 - `KENFOLD_AUTH=none` disables authentication; every write is then attributed to the client's self-reported name.
 - The secret filter is pattern-based: it catches well-known token formats and random-looking values assigned to secret-named fields, not every possible secret. Treat it as a safety net; agents are still told never to store secrets.
@@ -241,7 +252,7 @@ kenfold memory reject <id>... [--reason R]
 kenfold memory forget <id> [--reason R]
 kenfold extract status               extraction progress
 kenfold extract run [--limit N]      extract memories from session summaries now
-kenfold oauth password               set the owner password for the OAuth consent page
+kenfold password                     set the owner password (dashboard login, OAuth consent page)
 kenfold oauth clients [--all]        approved OAuth clients (ChatGPT, claude.ai, ...)
 kenfold oauth revoke <grant>         revoke an OAuth client and its tokens
 kenfold refs sync [--dir D] [--quiet]
@@ -271,6 +282,7 @@ kenfold version
 | `KENFOLD_PUBLIC_URL` | unset. The https URL remote clients reach Kenfold at, e.g. `https://kenfold.example.com` (no path); its host is added to `KENFOLD_ALLOWED_HOSTS`, and it enables OAuth |
 | `KENFOLD_OAUTH` | on when `KENFOLD_PUBLIC_URL` is set; the built-in OAuth 2.1 authorization server |
 | `KENFOLD_OAUTH_DCR` | `true`; dynamic client registration (clients identified by a metadata document URL work either way) |
+| `KENFOLD_DASHBOARD` | `local`: the dashboard at `/dashboard/` answers on loopback host names only, not through a proxy or tunnel. `remote` also serves it on the `KENFOLD_PUBLIC_URL` host; `off` turns it off |
 | `KENFOLD_AGENT` | agent name for `kenfold mcp` (stdio), e.g. `codex` |
 | `KENFOLD_EMBED_URL` | unset (full-text search only). Any OpenAI-compatible embeddings API, e.g. `http://127.0.0.1:11434/v1` for Ollama |
 | `KENFOLD_EMBED_MODEL` | `bge-m3`. Must produce 1024-dimensional vectors |
@@ -316,6 +328,7 @@ internal/retrieve/    search pipeline (first stage, graph expansion, rerank, rec
 internal/rerank/      rerank API client (llama.cpp, Jina, Cohere, Voyage)
 internal/coderef/     code references: extraction from text, git + tree-sitter checks, sync client
 internal/restapi/     REST API (/api/v1) for non-agent clients
+internal/dashboard/   web dashboard for the owner: review, memories, clients (server-rendered, no JavaScript)
 internal/hook/        Claude Code / Codex session hook: context injection, capture, spool
 internal/extract/     model-based memory extraction and classification; eval set
 internal/chat/        OpenAI-compatible chat client (structured output)
@@ -342,4 +355,4 @@ docs/                 ADRs and specs
 | **2b** ✅ | Model-based extraction of memories from sessions (reviewed), type classification |
 | **3** ✅ | Rerank, graph expansion, recency and staleness in ranking, code references with commit-based invalidation (tree-sitter symbols), REST API |
 | **4** ✅ | OAuth 2.1 authorization server (client metadata documents, dynamic registration, `private_key_jwt`, read-only grants), remote deployment behind a tunnel or proxy; verified end to end with the MCP SDK's OAuth client over HTTPS, not yet from ChatGPT itself. Object storage and an OpenAI-compatible proxy were deferred ([ADR-0003](docs/adr/0003-remote-access-and-oauth.md)) |
-| 5 | Export/import ✅; consolidation, review dashboard, public benchmarks (LongMemEval, LoCoMo) |
+| 5 | Export/import ✅, review dashboard ✅; consolidation, public benchmarks (LongMemEval, LoCoMo) |

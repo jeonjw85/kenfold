@@ -1,0 +1,43 @@
+{{define "content"}}
+<h1>Memories</h1>
+{{with .Data}}
+<form method="get" action="/dashboard/memories" class="filters" role="search">
+  <label for="q">Search</label>
+  <input type="search" id="q" name="q" value="{{.Query}}" placeholder="what agents would ask">
+  <label for="scope">Scope</label>
+  <select id="scope" name="scope">
+    <option value="">All scopes</option>
+    {{range .Scopes}}<option value="{{.Scope}}"{{if eq .Scope $.Data.Scope}} selected{{end}}>{{scopeLabel .Scope}}</option>{{end}}
+  </select>
+  <label for="type">Type</label>
+  <select id="type" name="type">
+    <option value="">All types</option>
+    {{range .Types}}<option value="{{.}}"{{if eq (print .) $.Data.Type}} selected{{end}}>{{.}}</option>{{end}}
+  </select>
+  <label for="status">Status</label>
+  <select id="status" name="status">
+    {{range .Statuses}}<option value="{{.}}"{{if eq (print .) $.Data.Status}} selected{{end}}>{{.}}</option>{{end}}
+    <option value="all"{{if eq .Status "all"}} selected{{end}}>all</option>
+  </select>
+  <span class="check"><input type="checkbox" id="stale" name="stale" value="1"{{if .Stale}} checked{{end}}><label for="stale">Code changed</label></span>
+  <button type="submit">Show</button>
+</form>
+{{if .Note}}<p class="muted">{{.Note}}</p>{{end}}
+{{if .Searched}}<p class="muted">Ranked as agents see it{{if .Scope}} in this project (with user-wide memories){{end}}.</p>{{end}}
+{{if not .Rows}}<p class="empty">No memories match.</p>{{else}}
+<ul class="list">
+{{range .Rows}}{{$m := .Memory}}
+  <li>
+    <p class="meta">{{template "badges" $m}}{{if stale .Refs}} <span class="badge stale">code changed</span>{{end}}{{if .Score}} <span class="meta">score {{printf "%.2f" .Score}}</span>{{end}}</p>
+    <p><a href="/dashboard/memories/{{$m.ID}}">{{trunc $m.Content 280}}</a></p>
+    <p class="meta">{{template "provenance" $m}}</p>
+  </li>
+{{end}}
+</ul>
+{{end}}
+<nav class="pager" aria-label="Pages">
+  {{if and (not .Searched) (gt .Page 1)}}<a href="/dashboard/memories?scope={{.Scope}}&amp;type={{.Type}}&amp;status={{.Status}}{{if .Stale}}&amp;stale=1{{end}}&amp;page={{add .Page -1}}">Previous</a>{{end}}
+  {{if .More}}<a href="/dashboard/memories?scope={{.Scope}}&amp;type={{.Type}}&amp;status={{.Status}}{{if .Stale}}&amp;stale=1{{end}}&amp;page={{add .Page 1}}">Next</a>{{end}}
+</nav>
+{{end}}
+{{end}}

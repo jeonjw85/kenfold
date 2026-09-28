@@ -122,8 +122,23 @@ func TestPublicURLAndOAuth(t *testing.T) {
 	}
 }
 
+func TestDashboardConfig(t *testing.T) {
+	if c, err := LoadFrom(env(nil)); err != nil || c.Dashboard != DashboardLocal {
+		t.Errorf("default: %q %v", c.Dashboard, err)
+	}
+	if c, err := LoadFrom(env(map[string]string{"KENFOLD_DASHBOARD": "OFF"})); err != nil || c.Dashboard != DashboardOff {
+		t.Errorf("off: %q %v", c.Dashboard, err)
+	}
+	if c, err := LoadFrom(env(map[string]string{"KENFOLD_DASHBOARD": "remote", "KENFOLD_PUBLIC_URL": "https://k.example.com"})); err != nil || c.Dashboard != DashboardRemote {
+		t.Errorf("remote: %q %v", c.Dashboard, err)
+	}
+}
+
 func TestLoadInvalid(t *testing.T) {
 	for _, m := range []map[string]string{
+		{"KENFOLD_DASHBOARD": "public"},
+		{"KENFOLD_DASHBOARD": "remote"},
+		{"KENFOLD_DASHBOARD": "remote", "KENFOLD_PUBLIC_URL": "http://127.0.0.1:7077"},
 		{"KENFOLD_PUBLIC_URL": "http://kenfold.example.com"}, // no TLS on a network address
 		{"KENFOLD_PUBLIC_URL": "https://kenfold.example.com/memory"},
 		{"KENFOLD_PUBLIC_URL": "https://user:pw@kenfold.example.com"},

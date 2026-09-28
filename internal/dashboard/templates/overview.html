@@ -1,0 +1,38 @@
+{{define "content"}}
+<h1>Overview</h1>
+{{with .Data}}
+<ul class="cards">
+  <li class="card{{if .Proposed}} attention{{end}}"><a href="/dashboard/review"><span class="big">{{.Proposed}}</span> awaiting review</a></li>
+  {{if .HasConsol}}<li class="card{{if .Proposals}} attention{{end}}"><a href="/dashboard/consolidation"><span class="big">{{.Proposals}}</span> consolidation proposals</a></li>{{end}}
+  <li class="card{{if .Stale}} attention{{end}}"><a href="/dashboard/memories?stale=1"><span class="big">{{.Stale}}</span> may be outdated (code changed)</a></li>
+  <li class="card"><a href="/dashboard/memories"><span class="big">{{.Active}}</span> active memories</a></li>
+</ul>
+
+<h2>Active memories by type</h2>
+<table>
+<thead><tr><th scope="col">Type</th><th scope="col" class="num">Memories</th></tr></thead>
+<tbody>
+{{range .ByType}}<tr><th scope="row"><a href="/dashboard/memories?type={{.Type}}">{{.Type}}</a></th><td class="num">{{.Count}}</td></tr>{{end}}
+</tbody>
+</table>
+
+<h2>Scopes</h2>
+{{if .Scopes}}
+<table>
+<thead><tr><th scope="col">Scope</th><th scope="col" class="num">Active</th><th scope="col" class="num">Awaiting review</th></tr></thead>
+<tbody>
+{{range .Scopes}}<tr><th scope="row"><a href="/dashboard/memories?scope={{.Scope}}">{{scopeLabel .Scope}}</a></th><td class="num">{{.Active}}</td><td class="num">{{if .Proposed}}<a href="/dashboard/review?scope={{.Scope}}">{{.Proposed}}</a>{{else}}0{{end}}</td></tr>{{end}}
+</tbody>
+</table>
+{{else}}<p class="muted">No memories yet. Connect an agent (see the README) and they will appear here.</p>{{end}}
+
+<h2>Background work</h2>
+<dl class="facts">
+  <dt>Session summaries waiting for extraction</dt><dd>{{.Extraction.Pending}}{{if .Extraction.Failed}} ({{.Extraction.Failed}} failed){{end}}</dd>
+  <dt>Memories extracted so far</dt><dd>{{.Extraction.Stored}}</dd>
+  <dt>History (superseded)</dt><dd><a href="/dashboard/memories?status=superseded">{{.Superseded}}</a></dd>
+  <dt>Forgotten or rejected</dt><dd><a href="/dashboard/memories?status=deleted">{{.Deleted}}</a></dd>
+  <dt>Clients</dt><dd><a href="/dashboard/clients">{{.Keys}} API keys, {{.Grants}} OAuth clients</a></dd>
+</dl>
+{{end}}
+{{end}}
