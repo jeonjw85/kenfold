@@ -11,9 +11,11 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kenfold/kenfold/internal/apikey"
+	"github.com/kenfold/kenfold/internal/authz"
 	"github.com/kenfold/kenfold/internal/coderef"
 	"github.com/kenfold/kenfold/internal/memory"
 	"github.com/kenfold/kenfold/internal/retrieve"
@@ -94,6 +96,9 @@ func (h *handlers) classify(ctx context.Context, content, scope string) (memory.
 // ---- remember ----
 
 func (h *handlers) remember(ctx context.Context, req *mcp.CallToolRequest, in RememberInput) (*mcp.CallToolResult, RememberOutput, error) {
+	if res, out, err, denied := denyReadOnly[RememberOutput](req, "remember"); denied {
+		return res, out, err
+	}
 	content := strings.TrimSpace(in.Content)
 	if content == "" {
 		return toolError[RememberOutput]("content must not be empty")
@@ -260,6 +265,9 @@ func secretMessage(field string, fs []secrets.Finding) string {
 // ---- forget ----
 
 func (h *handlers) forget(ctx context.Context, req *mcp.CallToolRequest, in ForgetInput) (*mcp.CallToolResult, ForgetOutput, error) {
+	if res, out, err, denied := denyReadOnly[ForgetOutput](req, "forget"); denied {
+		return res, out, err
+	}
 	id := strings.TrimSpace(in.ID)
 	if !store.ValidID(id) {
 		return toolError[ForgetOutput](fmt.Sprintf("%q is not a memory id (use an id returned by remember, recall, or get_context)", in.ID))
@@ -307,6 +315,9 @@ func (h *handlers) recall(ctx context.Context, _ *mcp.CallToolRequest, in Recall
 // ---- handoff / resume ----
 
 func (h *handlers) handoff(ctx context.Context, req *mcp.CallToolRequest, in HandoffInput) (*mcp.CallToolResult, HandoffOutput, error) {
+	if res, out, err, denied := denyReadOnly[HandoffOutput](req, "handoff"); denied {
+		return res, out, err
+	}
 	summary := strings.TrimSpace(in.Summary)
 	if summary == "" {
 		return toolError[HandoffOutput]("summary must not be empty")
@@ -363,6 +374,9 @@ func (h *handlers) handoff(ctx context.Context, req *mcp.CallToolRequest, in Han
 }
 
 func (h *handlers) resume(ctx context.Context, req *mcp.CallToolRequest, in ResumeInput) (*mcp.CallToolResult, ResumeOutput, error) {
+	if res, out, err, denied := denyReadOnly[ResumeOutput](req, "resume"); denied {
+		return res, out, err
+	}
 	scope, err := scopeFor(in.Project)
 	if err != nil {
 		return toolError[ResumeOutput](err.Error())
@@ -597,6 +611,20 @@ func (h *handlers) agentOf(req *mcp.CallToolRequest) string {
 		}
 	}
 	return memory.UnknownAgent
+}
+
+// denyReadOnly returns a tool error when the caller's grant is read-only.
+func denyReadOnly[Out any](req *mcp.CallToolRequest, tool string) (*mcp.CallToolResult, Out, error, bool) {
+	var ti *auth.TokenInfo
+	if req != nil && req.Extra != nil {
+		ti = req.Extra.TokenInfo
+	}
+	if authz.CanWrite(ti) {
+		var zero Out
+		return nil, zero, nil, false
+	}
+	res, out, err := toolError[Out](tool + " is not allowed: this client was granted read-only access to Kenfold memory (the owner can connect it again with write access)")
+	return res, out, err, true
 }
 
 // sessionOf returns the client's agent session id from _meta (see

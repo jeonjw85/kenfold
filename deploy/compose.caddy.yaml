@@ -1,0 +1,29 @@
+# Caddy in front of Kenfold, for a server with a public DNS name pointing at
+# it. Only Caddy's ports are published; Kenfold stays on the compose network
+# (and on 127.0.0.1:7077 for local agents). Read docs/deploy.md first: this
+# makes Kenfold reachable from the internet.
+#
+#   export KENFOLD_DOMAIN=kenfold.example.com KENFOLD_PUBLIC_URL=https://kenfold.example.com
+#   docker compose -f compose.yaml -f deploy/compose.caddy.yaml up -d --build --wait
+services:
+  caddy:
+    image: caddy:2.11.4-alpine
+    environment:
+      KENFOLD_DOMAIN: ${KENFOLD_DOMAIN:?set KENFOLD_DOMAIN to the public hostname}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      # Paths are relative to the first compose file (the repository root).
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      kenfold:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

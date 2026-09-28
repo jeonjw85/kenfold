@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kenfold/kenfold/internal/apikey"
@@ -23,6 +24,7 @@ import (
 	"github.com/kenfold/kenfold/internal/httpserver"
 	"github.com/kenfold/kenfold/internal/mcpserver"
 	"github.com/kenfold/kenfold/internal/memory"
+	"github.com/kenfold/kenfold/internal/oauth"
 	"github.com/kenfold/kenfold/internal/rerank"
 	"github.com/kenfold/kenfold/internal/restapi"
 	"github.com/kenfold/kenfold/internal/retrieve"
@@ -49,6 +51,8 @@ type runtime struct {
 	embedder *embed.Client  // nil when embeddings are disabled
 	chat     *chat.Client   // nil when no chat model is configured
 	reranker *rerank.Client // nil when no reranker is configured
+	oauth    *oauth.Server  // nil when OAuth is disabled
+	oauthDB  *oauth.Store
 }
 
 func newRuntime(ctx context.Context, cfg config.Config) (*runtime, error) {
@@ -56,7 +60,14 @@ func newRuntime(ctx context.Context, cfg config.Config) (*runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("database pool: %w", err)
 	}
-	rt := &runtime{pool: pool, store: store.New(pool), keys: apikey.NewStore(pool)}
+	rt := &runtime{pool: pool, store: store.New(pool), keys: apikey.NewStore(pool), oauthDB: oauth.NewStore(pool)}
+	if cfg.OAuth {
+		rt.oauth, err = oauth.New(rt.oauthDB, oauth.Config{PublicURL: cfg.PublicURL, MCPPath: httpserver.MCPPath, DCR: cfg.OAuthDCR})
+		if err != nil {
+			pool.Close()
+			return nil, err
+		}
+	}
 	if cfg.Embed.Enabled() {
 		rt.embedder, err = embed.New(embed.Config{
 			BaseURL:        cfg.Embed.URL,
@@ -143,6 +154,19 @@ func httpHandler(cfg config.Config, rt *runtime, logger *slog.Logger) http.Handl
 	if cfg.Auth == config.AuthAPIKey {
 		opts.Verifier = rt.keys.TokenVerifier(logger)
 	}
+	if rt.oauth != nil {
+		rt.oauth.SetLogger(logger)
+		keys, tokens := opts.Verifier, rt.oauth
+		// OAuth access tokens and API keys have distinct prefixes (kfa_ vs kf_).
+		opts.Verifier = func(ctx context.Context, token string, r *http.Request) (*auth.TokenInfo, error) {
+			if oauth.IsAccessToken(token) {
+				return tokens.Verify(ctx, token)
+			}
+			return keys(ctx, token, r)
+		}
+		opts.OAuth = rt.oauth.Routes
+		opts.ResourceMetadataURL = rt.oauth.ResourceMetadataURL()
+	}
 	return httpserver.New(mcpserver.New(buildinfo.Version, deps), rt.pool, logger, opts)
 }
 
@@ -199,6 +223,17 @@ func (c *cli) serve(ctx context.Context) error {
 			c.logger.Info("code references recorded for existing memories", "memories", n)
 		}
 	})
+	if rt.oauth != nil {
+		set, err := rt.oauthDB.OwnerPasswordSet(ctx)
+		switch {
+		case err != nil:
+			c.logger.Warn("could not check the OAuth owner password", "err", err)
+		case !set:
+			c.logger.Warn("OAuth is enabled but no owner password is set, so no client can be approved; set one with: kenfold oauth password")
+		}
+		c.logger.Info("oauth enabled", "issuer", c.cfg.PublicURL, "resource", rt.oauth.Resource(), "dynamic_registration", c.cfg.OAuthDCR)
+		wg.Go(func() { oauthPruneLoop(bgCtx, rt.oauthDB, c.logger, time.Hour) })
+	}
 	if rt.chat != nil {
 		c.logger.Info("chat model configured", "endpoint", rt.chat.Endpoint(), "model", rt.chat.Model(),
 			"extract", c.cfg.Extract, "extract_policy", c.cfg.ExtractPolicy, "classify", c.cfg.Classify)
@@ -382,4 +417,23 @@ func refTargets(content string) []store.RefTarget {
 		out = append(out, store.RefTarget(r))
 	}
 	return out
+}
+
+// oauthPruneLoop deletes expired OAuth codes and tokens and abandoned client
+// registrations.
+func oauthPruneLoop(ctx context.Context, st *oauth.Store, logger *slog.Logger, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		if n, err := st.Prune(ctx); err != nil && ctx.Err() == nil {
+			logger.Warn("oauth cleanup failed", "err", err)
+		} else if n > 0 {
+			logger.Debug("oauth cleanup", "deleted", n)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }

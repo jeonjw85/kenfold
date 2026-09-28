@@ -181,12 +181,43 @@ func TestMigrationsIntegration(t *testing.T) {
 		t.Errorf("memory_ref rows after cascade = %d, %v", refs, err)
 	}
 
+	// 00006: one owner row; grants and tokens cascade from clients.
+	if err := exec(`INSERT INTO oauth_owner (id, password_hash) VALUES (2, 'x')`); err == nil {
+		t.Error("a second owner row was accepted")
+	}
+	if err := exec(`INSERT INTO oauth_client (client_id, kind, redirect_uris) VALUES ('c1', 'cimd', '{https://a.example/cb}')`); err != nil {
+		t.Fatalf("insert client: %v", err)
+	}
+	if err := exec(`INSERT INTO oauth_client (client_id, kind, redirect_uris) VALUES ('c2', 'cimd', '{}')`); err == nil {
+		t.Error("client without redirect URIs accepted")
+	}
+	var gid string
+	if err := db.QueryRowContext(ctx, `INSERT INTO oauth_grant (client_id, agent, scopes, resource) VALUES ('c1', 'chatgpt', '{memory:read}', 'https://k.example/mcp') RETURNING id`).Scan(&gid); err != nil {
+		t.Fatalf("insert grant: %v", err)
+	}
+	if err := exec(`INSERT INTO oauth_grant (client_id, agent, scopes, resource) VALUES ('c1', 'Bad Agent', '{memory:read}', 'r')`); err == nil {
+		t.Error("invalid agent name accepted")
+	}
+	if err := exec(`INSERT INTO oauth_token (token_hash, kind, grant_id, scopes, expires_at) VALUES (decode(repeat('ab', 32), 'hex'), 'access', $1, '{memory:read}', now())`, gid); err != nil {
+		t.Fatalf("insert token: %v", err)
+	}
+	if err := exec(`INSERT INTO oauth_token (token_hash, kind, grant_id, scopes, expires_at) VALUES (decode('ab', 'hex'), 'access', $1, '{memory:read}', now())`, gid); err == nil {
+		t.Error("short token hash accepted")
+	}
+	if err := exec(`DELETE FROM oauth_client WHERE client_id = 'c1'`); err != nil {
+		t.Fatal(err)
+	}
+	var oauthRows int
+	if err := db.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM oauth_grant) + (SELECT count(*) FROM oauth_token)`).Scan(&oauthRows); err != nil || oauthRows != 0 {
+		t.Errorf("oauth rows after cascade = %d, %v", oauthRows, err)
+	}
+
 	// Down must fully revert.
 	if _, err := p.DownTo(ctx, 0); err != nil {
 		t.Fatalf("down: %v", err)
 	}
 	var tables int
-	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pg_tables WHERE tablename IN ('memory', 'memory_edge', 'api_key', 'extraction', 'memory_ref')`).Scan(&tables); err != nil || tables != 0 {
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pg_tables WHERE tablename IN ('memory', 'memory_edge', 'api_key', 'extraction', 'memory_ref', 'oauth_owner', 'oauth_client', 'oauth_grant', 'oauth_code', 'oauth_token')`).Scan(&tables); err != nil || tables != 0 {
 		t.Errorf("tables after down = %d, %v; want 0", tables, err)
 	}
 	// Leave the schema migrated for manual inspection.

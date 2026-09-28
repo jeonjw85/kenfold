@@ -100,8 +100,37 @@ func TestRerankConfig(t *testing.T) {
 	}
 }
 
+func TestPublicURLAndOAuth(t *testing.T) {
+	c, err := LoadFrom(env(nil))
+	if err != nil || c.OAuth || c.OAuthDCR || c.PublicURL != "" {
+		t.Errorf("defaults: oauth %v dcr %v url %q %v", c.OAuth, c.OAuthDCR, c.PublicURL, err)
+	}
+	c, err = LoadFrom(env(map[string]string{"KENFOLD_PUBLIC_URL": "https://Kenfold.Example.com/"}))
+	if err != nil || !c.OAuth || !c.OAuthDCR || c.PublicURL != "https://kenfold.example.com" || !slices.Contains(c.AllowedHosts, "kenfold.example.com") {
+		t.Errorf("public URL: %+v %v", c, err)
+	}
+	c, err = LoadFrom(env(map[string]string{"KENFOLD_PUBLIC_URL": "https://kenfold.example.com", "KENFOLD_OAUTH_DCR": "false", "KENFOLD_ALLOWED_HOSTS": "localhost"}))
+	if err != nil || !c.OAuth || c.OAuthDCR || !slices.Equal(c.AllowedHosts, []string{"localhost", "kenfold.example.com"}) {
+		t.Errorf("dcr off: %+v %v", c, err)
+	}
+	c, err = LoadFrom(env(map[string]string{"KENFOLD_PUBLIC_URL": "https://kenfold.example.com", "KENFOLD_OAUTH": "false"}))
+	if err != nil || c.OAuth || c.OAuthDCR {
+		t.Errorf("oauth off: %+v %v", c, err)
+	}
+	if c, err := LoadFrom(env(map[string]string{"KENFOLD_PUBLIC_URL": "http://127.0.0.1:7077"})); err != nil || !c.OAuth {
+		t.Errorf("loopback http (local testing): %v", err)
+	}
+}
+
 func TestLoadInvalid(t *testing.T) {
 	for _, m := range []map[string]string{
+		{"KENFOLD_PUBLIC_URL": "http://kenfold.example.com"}, // no TLS on a network address
+		{"KENFOLD_PUBLIC_URL": "https://kenfold.example.com/memory"},
+		{"KENFOLD_PUBLIC_URL": "https://user:pw@kenfold.example.com"},
+		{"KENFOLD_PUBLIC_URL": "kenfold.example.com"},
+		{"KENFOLD_OAUTH": "true"},
+		{"KENFOLD_PUBLIC_URL": "https://kenfold.example.com", "KENFOLD_AUTH": "none"},
+		{"KENFOLD_PUBLIC_URL": "https://kenfold.example.com", "KENFOLD_OAUTH_DCR": "maybe"},
 		{"KENFOLD_RERANK_URL": "reranker:8080"},
 		{"KENFOLD_CHAT_URL": "ollama:11434"},
 		{"KENFOLD_CHAT_URL": "http://x/v1", "KENFOLD_CHAT_REASONING": "maximum"},

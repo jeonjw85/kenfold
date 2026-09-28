@@ -1,0 +1,9 @@
+# Caddy in front of Kenfold (see docs/deploy.md). KENFOLD_DOMAIN is the public
+# hostname; Caddy obtains and renews its TLS certificate automatically.
+{$KENFOLD_DOMAIN} {
+	header Strict-Transport-Security "max-age=31536000"
+	reverse_proxy kenfold:7077 {
+		# MCP responses can be event streams: pass them through unbuffered.
+		flush_interval -1
+	}
+}

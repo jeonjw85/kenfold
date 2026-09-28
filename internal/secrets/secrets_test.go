@@ -54,6 +54,8 @@ func TestDetectsSecrets(t *testing.T) {
 	add("npm", "npm-token", "", join("np", "m_", randFrom(alnum, 36)), "")
 	add("huggingface", "huggingface-token", "", join("h", "f_", randFrom(alnum, 34)), "")
 	add("kenfold", "kenfold-key", "Bearer? no: ", join("kf", "_", randFrom(b64url, 42), "-"), " end")
+	add("kenfold oauth access", "kenfold-oauth-token", "token ", join("kf", "a_", randFrom(b64url, 43)), "")
+	add("kenfold oauth refresh", "kenfold-oauth-token", "refresh=", join("kf", "r_", randFrom(b64url, 43)), " ")
 	jwt := join("ey", "J", randFrom(b64url, 20), ".ey", "J", randFrom(b64url, 30), ".", randFrom(b64url, 43))
 	add("jwt", "jwt", "session ", jwt, "")
 	add("postgres url", "url-credentials", "DATABASE_URL=postgres://app:", "Xk29fLq0Zr", "@db.internal:5432/app")

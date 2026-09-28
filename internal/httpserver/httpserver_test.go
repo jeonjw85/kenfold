@@ -242,3 +242,17 @@ func TestHealthIgnoresHostAllowlist(t *testing.T) {
 		t.Errorf("healthz with foreign Host = %d", resp.StatusCode)
 	}
 }
+
+// A native `kenfold serve` on 127.0.0.1 behind a tunnel on the same machine
+// (cloudflared, tailscale funnel) receives the public Host over loopback.
+// Kenfold's own allowlist decides; the SDK's loopback-only check must not
+// reject it.
+func TestAllowedPublicHostOverLoopback(t *testing.T) {
+	ts := newTestServer(t, fakeDB{}, Options{AllowedHosts: append([]string{"kenfold.example.com"}, loopback...)})
+	if got := postMCP(t, ts.URL, "kenfold.example.com", ""); got == http.StatusForbidden {
+		t.Errorf("allowed public Host over loopback: status %d", got)
+	}
+	if got := postMCP(t, ts.URL, "evil.example", ""); got != http.StatusForbidden {
+		t.Errorf("foreign Host over loopback: status %d", got)
+	}
+}

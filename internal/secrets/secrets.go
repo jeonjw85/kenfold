@@ -63,6 +63,8 @@ var rules = []rule{
 		re: regexp.MustCompile(`\bhf_[A-Za-z0-9]{30,}\b`)},
 	{id: "kenfold-key", label: "Kenfold API key",
 		re: regexp.MustCompile(`\bkf_[A-Za-z0-9_-]{43}`)},
+	{id: "kenfold-oauth-token", label: "Kenfold OAuth token",
+		re: regexp.MustCompile(`\bkf[arc]_[A-Za-z0-9_-]{43}`)},
 	{id: "jwt", label: "JSON Web Token",
 		re: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`)},
 	{id: "url-credentials", label: "password in URL",

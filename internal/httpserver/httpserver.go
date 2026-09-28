@@ -33,6 +33,15 @@ type Options struct {
 	Verifier auth.TokenVerifier
 	// API, if set, is served under APIPrefix with the same protections as /mcp.
 	API http.Handler
+	// OAuth, if set, registers the authorization server's endpoints
+	// (metadata, authorize, token, register, revoke). They are behind the
+	// Host allowlist; the consent form is also behind cross-origin
+	// protection, while the token, registration, and revocation endpoints are
+	// called server to server and authenticate with PKCE and tokens instead.
+	OAuth func(mux *http.ServeMux)
+	// ResourceMetadataURL is advertised in WWW-Authenticate challenges on
+	// /mcp and the API so OAuth clients can discover the authorization server.
+	ResourceMetadataURL string
 }
 
 // APIPrefix is where Options.API is mounted.
@@ -68,6 +77,10 @@ func New(mcpServer *mcp.Server, db Pinger, logger *slog.Logger, opts Options) ht
 			Stateless:                    true,
 			Logger:                       logger,
 			PropagateRequestCancellation: true,
+			// Kenfold's Host allowlist (below) replaces the SDK's check, which
+			// only covers loopback listeners and would reject the public host
+			// of a native server behind a local tunnel.
+			DisableLocalhostProtection: true,
 		},
 	)
 	// Layered defenses, outermost first:
@@ -78,10 +91,12 @@ func New(mcpServer *mcp.Server, db Pinger, logger *slog.Logger, opts Options) ht
 	//   - Bearer token (when enabled): identifies the calling agent.
 	protect := func(h http.Handler) http.Handler {
 		if opts.Verifier != nil {
-			// API keys do not expire (they are revoked), hence AllowMissingExpiration.
+			// API keys do not expire (they are revoked), hence AllowMissingExpiration;
+			// OAuth access tokens carry an expiration, which the middleware checks.
 			// The verified TokenInfo reaches tool handlers as req.Extra.TokenInfo.
 			h = auth.RequireBearerToken(opts.Verifier, &auth.RequireBearerTokenOptions{
 				AllowMissingExpiration: true,
+				ResourceMetadataURL:    opts.ResourceMetadataURL,
 			})(h)
 		}
 		return requireHost(opts.AllowedHosts, http.NewCrossOriginProtection().Handler(h))
@@ -89,6 +104,21 @@ func New(mcpServer *mcp.Server, db Pinger, logger *slog.Logger, opts Options) ht
 	mux.Handle(MCPPath, protect(mcpHandler))
 	if opts.API != nil {
 		mux.Handle(APIPrefix, protect(opts.API))
+	}
+	if opts.OAuth != nil {
+		oauthMux := http.NewServeMux()
+		opts.OAuth(oauthMux)
+		csrf := http.NewCrossOriginProtection()
+		h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/oauth/authorize" {
+				csrf.Handler(oauthMux).ServeHTTP(w, r) // the consent form posts here
+				return
+			}
+			oauthMux.ServeHTTP(w, r)
+		})
+		for _, p := range []string{"/.well-known/", "/oauth/"} {
+			mux.Handle(p, requireHost(opts.AllowedHosts, h))
+		}
 	}
 
 	return mux

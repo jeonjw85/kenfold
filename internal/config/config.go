@@ -67,6 +67,16 @@ type Config struct {
 	// Rerank configures a cross-encoder reranker for search; disabled when
 	// Rerank.URL is empty.
 	Rerank Rerank
+
+	// PublicURL is the base URL remote clients reach Kenfold at (e.g.
+	// https://kenfold.example.com behind a TLS proxy or tunnel). Its host is
+	// added to AllowedHosts. Required for OAuth.
+	PublicURL string
+	// OAuth enables the built-in authorization server for remote clients
+	// (default: on when PublicURL is set).
+	OAuth bool
+	// OAuthDCR enables dynamic client registration (default: on with OAuth).
+	OAuthDCR bool
 }
 
 // Rerank configures a /rerank endpoint (llama-server, Jina, Cohere, Voyage).
@@ -198,6 +208,41 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 		c.SearchMaxDistance = f
 	}
 
+	if v := strings.TrimSpace(getenv("KENFOLD_PUBLIC_URL")); v != "" {
+		u, err := url.Parse(v)
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+			return Config{}, fmt.Errorf("KENFOLD_PUBLIC_URL: %q must be a base URL such as https://kenfold.example.com (no path)", v)
+		}
+		if u.Scheme == "http" && !loopbackHost(u.Hostname()) {
+			return Config{}, fmt.Errorf("KENFOLD_PUBLIC_URL: %q must use https; OAuth tokens and the owner password must not cross the network in the clear", v)
+		}
+		c.PublicURL = u.Scheme + "://" + strings.ToLower(u.Host)
+		if h := strings.ToLower(u.Hostname()); !slices.Contains(c.AllowedHosts, h) {
+			c.AllowedHosts = append(c.AllowedHosts, h)
+		}
+	}
+	for _, s := range []struct {
+		key string
+		dst *bool
+		def bool
+	}{{"KENFOLD_OAUTH", &c.OAuth, c.PublicURL != ""}, {"KENFOLD_OAUTH_DCR", &c.OAuthDCR, true}} {
+		*s.dst = s.def
+		if v := getenv(s.key); v != "" {
+			b, err := strconv.ParseBool(v)
+			if err != nil {
+				return Config{}, fmt.Errorf("%s: %q is not a boolean", s.key, v)
+			}
+			*s.dst = b
+		}
+	}
+	if c.OAuth && c.PublicURL == "" {
+		return Config{}, fmt.Errorf("KENFOLD_OAUTH=true needs KENFOLD_PUBLIC_URL (the https URL clients reach Kenfold at)")
+	}
+	if c.OAuth && c.Auth == AuthNone {
+		return Config{}, fmt.Errorf("KENFOLD_OAUTH needs KENFOLD_AUTH=apikey")
+	}
+	c.OAuthDCR = c.OAuthDCR && c.OAuth
+
 	if c.Rerank.URL != "" {
 		u, err := url.Parse(c.Rerank.URL)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
@@ -258,4 +303,9 @@ func boolEnv(getenv func(string) string, key string) (bool, error) {
 		return false, fmt.Errorf("%s: %w", key, err)
 	}
 	return b, nil
+}
+
+func loopbackHost(h string) bool {
+	h = strings.Trim(strings.ToLower(h), "[]")
+	return h == "localhost" || h == "127.0.0.1" || h == "::1"
 }

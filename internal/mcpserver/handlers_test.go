@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"github.com/kenfold/kenfold/internal/authz"
 	"strings"
 	"testing"
 	"time"
@@ -230,4 +231,25 @@ func TestTruncateRunes(t *testing.T) {
 	if got := truncateRunes("abc", 5); got != "abc" {
 		t.Errorf("got %q", got)
 	}
+}
+
+func TestReadOnlyGrantCannotWrite(t *testing.T) {
+	h := newHandlers(Deps{}) // no store: a denied call must not reach it
+	ro := &mcp.CallToolRequest{Extra: &mcp.RequestExtra{TokenInfo: &auth.TokenInfo{Extra: map[string]any{authz.ExtraReadOnly: true}}}}
+	ctx := context.Background()
+	// toolError returns the message as an error; the SDK sends it as an isError result.
+	check := func(name string, _ *mcp.CallToolResult, err error) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), "read-only") {
+			t.Errorf("%s: want a read-only tool error, got %v", name, err)
+		}
+	}
+	res, _, err := h.remember(ctx, ro, RememberInput{Content: "x"})
+	check("remember", res, err)
+	res, _, err = h.handoff(ctx, ro, HandoffInput{Summary: "x"})
+	check("handoff", res, err)
+	res, _, err = h.resume(ctx, ro, ResumeInput{})
+	check("resume", res, err)
+	res, _, err = h.forget(ctx, ro, ForgetInput{ID: "01a0e2f4-5446-7fe9-bb7a-89d49ad44bfa"})
+	check("forget", res, err)
 }

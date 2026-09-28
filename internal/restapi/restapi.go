@@ -13,6 +13,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/modelcontextprotocol/go-sdk/auth"
+
+	"github.com/kenfold/kenfold/internal/authz"
 	"github.com/kenfold/kenfold/internal/coderef"
 	"github.com/kenfold/kenfold/internal/memory"
 	"github.com/kenfold/kenfold/internal/store"
@@ -91,6 +94,10 @@ func (a *api) listRefs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) checkRefs(w http.ResponseWriter, r *http.Request) {
+	if !authz.CanWrite(auth.TokenInfoFromContext(r.Context())) {
+		writeError(w, http.StatusForbidden, "this client was granted read-only access")
+		return
+	}
 	var rep coderef.CheckReport
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))
 	dec.DisallowUnknownFields()

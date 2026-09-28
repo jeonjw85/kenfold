@@ -57,6 +57,11 @@ services:
       KENFOLD_RERANK_URL: ${KENFOLD_RERANK_URL:-}
       KENFOLD_RERANK_MODEL: ${KENFOLD_RERANK_MODEL:-bge-reranker-v2-m3}
       KENFOLD_RERANK_API_KEY: ${KENFOLD_RERANK_API_KEY:-}
+      # Remote access (docs/deploy.md): the https URL clients reach Kenfold at,
+      # behind a TLS proxy or tunnel. Setting it enables the OAuth server.
+      KENFOLD_PUBLIC_URL: ${KENFOLD_PUBLIC_URL:-}
+      KENFOLD_OAUTH: ${KENFOLD_OAUTH:-}
+      KENFOLD_OAUTH_DCR: ${KENFOLD_OAUTH_DCR:-}
       KENFOLD_LOG_LEVEL: ${KENFOLD_LOG_LEVEL:-info}
     ports:
       - "127.0.0.1:7077:7077"

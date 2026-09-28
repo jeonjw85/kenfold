@@ -48,6 +48,10 @@ Usage:
   kenfold extract status               progress of memory extraction from session summaries
   kenfold extract run [--limit N]      extract memories now (needs KENFOLD_CHAT_URL)
 
+  kenfold oauth password               set the owner password asked for on the OAuth consent page
+  kenfold oauth clients [--all]        OAuth clients the owner approved (ChatGPT, claude.ai, ...)
+  kenfold oauth revoke <grant-id>      revoke a client's access and its tokens
+
   kenfold refs sync [--dir D] [--key-file F] [--quiet]
                                        check the code memories refer to against the repository's HEAD
   kenfold refs status [--scope S]      code reference states and memories that may be outdated
@@ -66,6 +70,10 @@ Environment:
   KENFOLD_DATABASE_URL         PostgreSQL URL             (default: local compose database)
   KENFOLD_AUTO_MIGRATE         migrate on serve           (default false)
   KENFOLD_ALLOWED_HOSTS        Host allowlist for /mcp    (default localhost,127.0.0.1,::1)
+  KENFOLD_PUBLIC_URL           https URL remote clients reach Kenfold at, e.g. https://kenfold.example.com
+                               (its host is allowed; enables OAuth)
+  KENFOLD_OAUTH                built-in OAuth authorization server (default: on with KENFOLD_PUBLIC_URL)
+  KENFOLD_OAUTH_DCR            dynamic client registration  (default true)
   KENFOLD_AUTH                 apikey | none              (default apikey)
   KENFOLD_AGENT                agent name for stdio sessions, e.g. claude-code
   KENFOLD_EMBED_URL            OpenAI-compatible embeddings base URL, e.g. http://127.0.0.1:11434/v1
@@ -182,6 +190,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdin i
 		return c.extract(ctx, rest)
 	case "refs":
 		return c.refs(ctx, rest)
+	case "oauth":
+		return c.oauthCmd(ctx, rest)
 	case "reindex":
 		if len(rest) > 0 {
 			return usageErr("reindex takes no arguments")

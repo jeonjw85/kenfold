@@ -8,6 +8,8 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/odvcencio/gotreesitter v0.55.1
 	github.com/pressly/goose/v3 v3.28.0
+	golang.org/x/crypto v0.55.0
+	golang.org/x/term v0.45.0
 )
 
 require (
