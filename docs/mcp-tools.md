@@ -17,13 +17,38 @@ Contract for the tools Kenfold exposes over MCP. Schemas are generated from the 
 
 ## Search
 
-`recall` and the `relevant` part of `get_context` use hybrid search:
+`recall` and the `relevant` part of `get_context` rank memories in stages (see [ADR-0002](adr/0002-retrieval-and-code-refs.md)):
 
-1. **Full-text**: the query's words are OR-ed (so a natural-language question matches memories that share some of its words) and ranked with `ts_rank`. Text search uses PostgreSQL's `simple` configuration: no stemming, which is predictable for mixed Korean and English.
-2. **Vector** (when an embedding model is configured): cosine similarity against memories embedded by the same model; matches farther than `KENFOLD_SEARCH_MAX_DISTANCE` (default 0.55) are dropped.
-3. The two rankings are fused with Reciprocal Rank Fusion (k = 60). `score` is normalized to (0, 1]: 1.0 means ranked first by every ranker that ran.
+1. **First stage, hybrid search**:
+   - Full-text: the query's words are OR-ed (so a natural-language question matches memories that share some of its words) and ranked with `ts_rank`. Text search uses PostgreSQL's `simple` configuration: no stemming, which is predictable for mixed Korean and English.
+   - Vector (when an embedding model is configured): cosine similarity against memories embedded by the same model; matches farther than `KENFOLD_SEARCH_MAX_DISTANCE` (default 0.55) are dropped.
+   - The two rankings are fused with Reciprocal Rank Fusion (k = 60) into a pool of 30 candidates.
+2. **Graph expansion** (with a reranker): memories one edge away from the eight best candidates join the pool: a session summary brings the facts extracted from it, and a fact brings its summary and the other facts from the same session.
+3. **Rerank** (when `KENFOLD_RERANK_URL` is set): a cross-encoder scores the 15 best candidates against the query. If it fails or takes longer than 4 s, the first-stage order is kept, without graph neighbors.
+4. **Signals**:
+   - Memories whose referenced code no longer exists keep 5% of their score, and those whose referenced symbol changed keep 60% (see [Code references](#code-references)).
+   - A query about recent work ("last time", "latest", "지난번", "최근") prefers recent memories of every type (half-life 7 days).
+   - With a reranker, session summaries also lose up to 40% of their score with age (half-life 30 days).
+
+   Graph expansion and summary aging are soft adjustments sized for the reranker's probabilities; on first-stage scores they reordered too much in the eval.
+
+`score` is in (0, 1]: with a reranker it is the reranker's relevance probability after the signals; without one, the fused score (1.0 means ranked first by every ranker).
 
 If the embedding provider fails or times out (10 s), the call still succeeds with full-text results only, and memories written meanwhile are embedded by a background backfill.
+
+## Code references
+
+Memories often describe code ("`RequireAPIKey` in internal/auth/middleware.go hashes the token"). When such a memory is written (by `remember` or by extraction; `project`, `codebase`, and `semantic` memories in a project), Kenfold records the files and symbols it mentions:
+
+- paths with a known source extension (or `Makefile`, `Dockerfile`, ...), without URLs, absolute paths, or product names such as `Next.js`;
+- symbols in backticks or written as calls (`Name()`), and, when exactly one file is mentioned, code-like identifiers (`CamelCase` with an inner capital, `snake_case`) looked up in that file.
+
+The server cannot read repositories, so clients that can check the references: `kenfold hook` at session start (within 2 s) and `kenfold refs sync` (for example from a git `post-commit` hook). A client anchors each reference to a content hash at `HEAD` (a file's blob id, or a whitespace-insensitive hash of the symbol's definition found with tree-sitter) and later reports whether that content changed. Rules that keep the result honest across checkouts and branches:
+
+- A reference is anchored only when its file has no uncommitted changes, since the memory may describe the uncommitted code.
+- An anchored reference is checked only in a checkout whose `HEAD` contains the anchor commit; an older or diverged checkout says nothing about it.
+
+States (in `code_refs[].state`): `pending` (not anchored yet), `current`, `changed`, `missing` (the file or symbol is gone). A memory is `stale` when a referenced file or symbol is missing or a referenced symbol changed; a changed file alone is not stale, since files change all the time. Stale memories rank lower (see [Search](#search)), come last in `get_context`'s `project[]`, and are marked in the session hook's context. `kenfold refs status` and `kenfold memory list --stale` list them for review.
 
 ## Tools
 
@@ -37,7 +62,7 @@ Load everything relevant at the start of a task, within a token budget.
 | `project` | string | | See conventions |
 | `budget_tokens` | integer | | Default 2000, clamped to 200–32000 |
 
-Returns, in priority order: `preferences[]` (active preferences, user-wide and project), `handoff` (the latest handoff for the project that no agent has resumed), `recent[]` (the latest three session summaries in the project, `episodic` memories written by session hooks, truncated to 800 characters), `project[]` (active `project` memories), and `relevant[]` (hybrid search on `task`). Each memory appears at most once. Memories that do not fit the budget are left out and `truncated` is set; use `recall` to find more. Token counts are estimates.
+Returns, in priority order: `preferences[]` (active preferences, user-wide and project), `handoff` (the latest handoff for the project that no agent has resumed), `recent[]` (the latest three session summaries in the project, `episodic` memories written by session hooks, truncated to 800 characters), `project[]` (active `project` memories, stale ones last), and `relevant[]` (search on `task`, see [Search](#search)). Each memory appears at most once. Memories that do not fit the budget are left out and `truncated` is set; use `recall` to find more. Token counts are estimates.
 
 ### `remember` (idempotent)
 
@@ -70,7 +95,7 @@ Search memory in natural language.
 | `project` | string | | User-wide memories are always included |
 | `limit` | integer | | Default 10, max 50 |
 
-Returns `memories[]` sorted by `score` (see [Search](#search)).
+Returns `memories[]` sorted by `score` (see [Search](#search)). With a local reranker on CPU a call takes 1–2 s; without one, about 25 ms.
 
 ### `handoff`
 
@@ -144,4 +169,15 @@ The same model classifies memories stored with `remember` without a `type` (`att
 }
 ```
 
-Optional fields: `expires_at` (temporary memories and handoffs), `next_steps` and `resumed_by` (handoffs), `score` (search results).
+Optional fields: `expires_at` (temporary memories and handoffs), `next_steps` and `resumed_by` (handoffs), `score` (search results), `code_refs` (files and symbols the memory refers to, with `state` and `checked_commit`), and `stale` (see [Code references](#code-references)).
+
+## REST API
+
+Non-agent clients use a small REST API under `/api/v1`, behind the same Host allowlist, cross-origin protection, and API keys as `/mcp`. Errors are `{"error": "..."}`.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/refs?project=P` | References to check for project `P`: `{"scope", "targets": [{"path", "symbol", "anchor_commit", "anchor_hash"}]}`, unanchored ones first (at most 500) |
+| `POST /api/v1/refs/check` | Report `{"project", "commit", "results": [{"path", "symbol", "anchor_commit", "found", "hash", "resolved_path"}]}` (at most 1000 results); returns counts by resulting state |
+
+A result without `anchor_commit` anchors the pending references to its target at `commit` (`found: false` marks them `unresolved`, and they are offered again later). A result with `anchor_commit` compares against the hash anchored at that commit.

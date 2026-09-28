@@ -21,7 +21,7 @@ Existing projects already cover "shared memory over MCP" (memorix, mcp-memory-se
 
 The ML-heavy parts (embedding, extraction, reranking) are HTTP calls to model providers, so Python's ecosystem advantage does not apply. Go gives a single static binary (easy `brew install`, 25 MB distroless image), low idle footprint for an always-on server, and an official MCP SDK (`modelcontextprotocol/go-sdk`) that supports the stateless 2026-07-28 protocol revision. A future web dashboard may use TypeScript.
 
-Known cost: tree-sitter (Phase 3 code indexing) requires cgo, which complicates cross-compilation. Revisit when Phase 3 starts.
+Known cost: tree-sitter (Phase 3 code indexing) requires cgo, which complicates cross-compilation. Resolved in Phase 3 with a pure-Go tree-sitter runtime (see [ADR-0002](0002-retrieval-and-code-refs.md)).
 
 ### Storage: PostgreSQL + pgvector as the single source of truth
 
@@ -82,7 +82,7 @@ Constraints enforce the invariants that must never be violated by any writer: va
 | 1 | Real storage/search for all types (full-text + vector, RRF), API keys, CLI, client setup for Claude Code / Codex / OpenCode, handoff/resume, exact dedup, supersede | a decision remembered in Claude Code is recalled in Codex (E2E test) |
 | 2 | Secret filter on writes, normalized dedup, similarity/contradiction hints, hook-based auto-capture of session summaries (Claude Code, Codex), handoff | handoff scenario E2E passes |
 | 2b | Model-based extraction of memories from session summaries (proposed for review by default) and type classification, with a local chat model (default `qwen3.5:4b`) | extracted memories measured on an internal eval set (dev + holdout; see `internal/extract/testdata/RESULTS.md`) |
-| 3 | Graph relations, tree-sitter indexing, commit-based invalidation, recency and graph signals in ranking, rerank | recall@5 target on internal eval set |
+| 3 | Graph expansion, recency and staleness signals, rerank, code references with commit-based invalidation (tree-sitter symbols), REST API; see [ADR-0002](0002-retrieval-and-code-refs.md) | recall@5 ≥ 0.90 dev / ≥ 0.85 holdout on the internal eval set, never below the hybrid baseline |
 | 4 | OAuth 2.1, HTTPS deployment/tunnel, object storage, ChatGPT, OpenAI-compatible proxy for local LLMs | recall works from ChatGPT |
 | 5 | Consolidation workers, review dashboard, LongMemEval/LoCoMo evals, export/import | ongoing |
 
@@ -90,4 +90,4 @@ Constraints enforce the invariants that must never be violated by any writer: va
 
 - Postgres is a hard dependency even for a single user. Accepted: it is what makes transactions over memory + graph + vectors possible. An embedded mode (e.g. SQLite) may be considered later for zero-setup installs.
 - A fixed embedding dimension makes changing to a model of a different size a deliberate migration; same-size model changes only re-embed.
-- MCP is the primary contract; a REST API will be added for the dashboard and non-MCP integrations, backed by the same service layer.
+- MCP is the primary contract. A REST API (`/api/v1`, since Phase 3) serves non-MCP clients with the same protections and keys; the dashboard will use it too.

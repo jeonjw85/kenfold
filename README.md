@@ -20,7 +20,7 @@ What makes it different (see [ADR-0001](docs/adr/0001-architecture.md)):
 - **Handoff** between agents: stop in Claude Code, resume in Codex
 - **Poisoning-aware**: memory is served as data, never as instructions; preferences need your approval
 
-> **Status: Phase 2b.** Shared storage, hybrid search (full-text + vectors), API keys, setup for Claude Code, Codex, and OpenCode, a server-side **secret filter**, duplicate and contradiction hints, **session hooks** that load memory at session start and record a summary at session end, and optional **model-based extraction** that turns session summaries into memories for your review.
+> **Status: Phase 3.** Shared storage, hybrid search with **reranking, graph expansion, and recency**, API keys, setup for Claude Code, Codex, and OpenCode, a server-side **secret filter**, duplicate and contradiction hints, **session hooks** that load memory at session start and record a summary at session end, optional **model-based extraction** that turns session summaries into memories for your review, and **code references**: memories about code are flagged when that code changes or disappears.
 
 ## Quickstart
 
@@ -32,13 +32,13 @@ make key AGENT=claude-code     # prints an API key for Claude Code (shown once)
 make key AGENT=codex           # one key per agent, so every memory is attributed correctly
 ```
 
-`make up` gives full-text search. For hybrid search, which also finds memories phrased differently from the query, run a local embedding model instead:
+`make up` gives full-text search. For better search, which also finds memories phrased differently from the query, run the local search models instead:
 
 ```sh
-make up-embed                  # adds Ollama with bge-m3 (first run downloads ~1.2 GB)
+make up-embed                  # adds Ollama with bge-m3 and a llama.cpp reranker (first run downloads ~1.9 GB)
 ```
 
-Memories written without embeddings are embedded automatically once a model is available.
+Memories written without embeddings are embedded automatically once a model is available. The reranker reads the query and each candidate memory together; on the internal eval set it raised recall@5 from 0.90 to 0.96 (see [Search quality](#search-quality)), at the cost of 1–2 seconds per search on CPU. `make up-embed RERANK=0` leaves it out.
 
 ## Connect your agents
 
@@ -114,14 +114,14 @@ bin/kenfold hook config claude-code --key-file ~/.config/kenfold/claude-code.key
 
 Merge the printed `hooks` object into `~/.claude/settings.json`. For Codex, use a `codex` key and `bin/kenfold hook config codex`, and save the output as `~/.codex/hooks.json`. Codex asks you to review new hooks: run `/hooks` once to trust them.
 
-`--no-capture` loads memory at session start without recording sessions.
+`--no-capture` loads memory at session start without recording sessions. The hook also checks the code that memories refer to at session start (see [Code references](#code-references)); `--no-refs` turns that off.
 
 ## Memory extraction (optional)
 
 Session summaries record what happened. With a chat model configured, Kenfold also reads each summary and proposes the durable memories in it: project rules ("use pnpm, not npm"), facts about the code ("the webhook dedupes by event_id"), and your preferences ("answer in Korean"). It skips one-off tasks and anything from pasted documents.
 
 ```sh
-make up-extract                # Ollama with bge-m3 and qwen3.5:4b (first run downloads ~4.6 GB)
+make up-extract                # up-embed plus qwen3.5:4b (first run downloads ~5.2 GB)
 make review                    # go through proposed memories: approve, reject, or replace an old one
 ```
 
@@ -131,6 +131,27 @@ The model runs on CPU in Docker and takes 10–30 seconds per session, in the ba
 
 `KENFOLD_EXTRACT_POLICY=auto` activates confident extractions that resemble no existing memory without review. Preferences are always reviewed. Keep the default unless you trust every source of your sessions: extraction is where instructions hidden in pasted content could become memory, and review is the main defense.
 
+## Code references
+
+Memories about code go stale when the code changes. When an agent stores "`RequireAPIKey` in internal/auth/middleware.go hashes the bearer token", Kenfold records the file and the symbol. At session start, the hook hashes them at your repository's `HEAD` (symbols are located with tree-sitter) and tells the server; after a later commit removes or rewrites `RequireAPIKey`, the memory is marked **stale**. Stale memories rank lower in search, come last in the project knowledge given at session start, and are shown to agents with a note such as "(outdated? RequireAPIKey in internal/auth/middleware.go changed since this was written)".
+
+Checks are commit-based: only committed code counts, a reference is anchored only when its file has no uncommitted changes, and a checkout that does not contain the anchoring commit (an older clone, another branch) never reports a change. A changed file alone does not make a memory stale; a changed or removed symbol, or a removed file, does.
+
+```sh
+bin/kenfold refs sync                        # check the current repository now (uses KENFOLD_API_KEY or --key-file)
+bin/kenfold refs status                      # counts by state, and the memories that may be outdated
+bin/kenfold memory list --stale              # the same memories, as a list
+```
+
+To check after every commit instead of at session start, add a git hook, e.g. `.git/hooks/post-commit`:
+
+```sh
+#!/bin/sh
+/abs/path/to/bin/kenfold refs sync --quiet --key-file ~/.config/kenfold/claude-code.key || true
+```
+
+Symbols are found in Go, TypeScript/TSX, JavaScript, Python, Rust, Java, Kotlin, Ruby, C#, PHP, C, C++, Swift, Scala, and Bash files with `make build` (`GRAMMARS=...` changes the set); other files are tracked as whole files.
+
 ## How memory works
 
 - **Projects** are identified by the git remote URL, normalized: `git@github.com:Org/Repo.git` and `https://github.com/org/repo` are the same project. Local paths are rejected, since they differ per checkout. Memories without a project are user-wide and are included everywhere.
@@ -138,7 +159,7 @@ The model runs on CPU in Docker and takes 10–30 seconds per session, in the ba
 - **Secrets are rejected.** Writes containing credentials (API keys and tokens from common providers, private keys, passwords in URLs or assignments, JWTs) fail with a message that names the kind of secret without repeating it. `bin/kenfold scan` finds secrets stored before this filter existed; `--redact` removes them.
 - **Preferences** written by agents are `proposed` and are not served until you approve them. Approved memories get `trust = user`.
 - **handoff** leaves one active note per project (a new one replaces the old). **resume** returns it and records who picked it up; **get_context** only offers handoffs nobody has resumed.
-- **recall** fuses full-text and vector rankings (Reciprocal Rank Fusion). If the embedding provider is down, Kenfold falls back to full-text search and embeds missed memories later.
+- **recall** fuses full-text and vector rankings (Reciprocal Rank Fusion), adds memories linked to the best matches (a session summary and the facts extracted from it), reranks the best candidates with a cross-encoder when one is configured, and prefers recent session summaries and memories whose code still exists. Asking about recent work ("what did we do last time", "지난번에") favors recent memories. If a model is down, Kenfold falls back to the stages that still work.
 
 Review what agents stored:
 
@@ -149,6 +170,21 @@ bin/kenfold memory list --status proposed   # e.g. preferences and extracted mem
 bin/kenfold memory approve <id>
 bin/kenfold memory forget <id> --reason "outdated"
 ```
+
+## Search quality
+
+Measured with `make eval-search` on an internal corpus of 110 memories in three projects and 67 queries in Korean and English (details in [internal/retrieve/testdata/RESULTS.md](internal/retrieve/testdata/RESULTS.md)). Recall@5 is the share of the memories that answer a query found in the top 5.
+
+| Setup | Dev (43 queries) | Holdout (24) | Time per search |
+|---|---|---|---|
+| `make up` (full-text) | 0.65 | 0.44 | a few ms |
+| Phase 2 hybrid search | 0.85 | 0.88 | ~25 ms |
+| `make up-embed RERANK=0` | 0.90 | 0.90 | ~25 ms |
+| `make up-embed` (with reranker) | **0.96** | **0.96** | ~1.8 s |
+
+Times are the search inside Kenfold on an Apple M5 CPU, with the models warm.
+
+The dev queries were used to tune the pipeline; the holdout queries were written afterwards by an independent author without access to the ranking code. This is a small, synthetic set: it shows the pipeline works as intended, not how it compares to other systems.
 
 ## MCP tools
 
@@ -167,7 +203,7 @@ Full contract: [docs/mcp-tools.md](docs/mcp-tools.md).
 
 - Ports are published on `127.0.0.1` only. Do not expose Kenfold to a network: there is no TLS, and until OAuth (Phase 4) there is no per-user authorization; any valid key can read all memory.
 - `/mcp` requires an API key (`KENFOLD_AUTH=apikey`, the default). Only a SHA-256 hash of each key is stored. Revoke a key with `bin/kenfold key revoke <prefix>`.
-- `/mcp` also enforces a Host allowlist (DNS rebinding) and rejects cross-site browser requests. `/healthz` and `/readyz` are unauthenticated and expose no data.
+- `/mcp` and the REST API (`/api/v1`, used by `kenfold refs sync` and the hook) enforce a Host allowlist (DNS rebinding) and reject cross-site browser requests. `/healthz` and `/readyz` are unauthenticated and expose no data.
 - `KENFOLD_AUTH=none` disables authentication; every write is then attributed to the client's self-reported name.
 - The secret filter is pattern-based: it catches well-known token formats and random-looking values assigned to secret-named fields, not every possible secret. Treat it as a safety net; agents are still told never to store secrets.
 
@@ -180,16 +216,20 @@ kenfold migrate [up|down|status]     database migrations
 kenfold key create <agent>           create an API key (printed once, to stdout)
 kenfold key list [--all]             list keys (--all includes revoked)
 kenfold key revoke <id|prefix>       revoke a key
-kenfold memory list [--status S] [--type T] [--scope S] [--limit N]
+kenfold memory list [--status S] [--type T] [--scope S] [--stale] [--limit N]
 kenfold memory review [--scope S]    go through proposed memories interactively
 kenfold memory approve <id>... [--replaces ID]
 kenfold memory reject <id>... [--reason R]
 kenfold memory forget <id> [--reason R]
 kenfold extract status               extraction progress
 kenfold extract run [--limit N]      extract memories from session summaries now
+kenfold refs sync [--dir D] [--quiet]
+                                     check the code memories refer to against the repository's HEAD
+kenfold refs status [--scope S]      code reference states and memories that may be outdated
 kenfold reindex                      embed memories missing an embedding for the configured model
 kenfold scan [--redact]              find (and remove) secrets stored before the secret filter
-kenfold hook                         session hook for Claude Code and Codex (event JSON on stdin)
+kenfold hook [--no-capture] [--no-refs]
+                                     session hook for Claude Code and Codex (event JSON on stdin)
 kenfold hook config <claude-code|codex> [--key-file F]
                                      print the hooks configuration for a client
 kenfold version
@@ -211,6 +251,9 @@ kenfold version
 | `KENFOLD_EMBED_API_KEY` | unset; sent as a bearer token to the embeddings API |
 | `KENFOLD_EMBED_DIMENSIONS` | `false`; send `dimensions=1024` (for models such as `text-embedding-3-large`) |
 | `KENFOLD_SEARCH_MAX_DISTANCE` | `0.55`, the cosine distance above which vector matches are ignored |
+| `KENFOLD_RERANK_URL` | unset (no reranking). A `/rerank` API: llama.cpp `llama-server --reranking` (`make up-embed` runs one), Jina, Cohere (`https://api.cohere.com/v2`), Voyage |
+| `KENFOLD_RERANK_MODEL` | `bge-reranker-v2-m3` |
+| `KENFOLD_RERANK_API_KEY` | unset; sent as a bearer token to the rerank API |
 | `KENFOLD_CHAT_URL` | unset (no extraction). Any OpenAI-compatible chat API, e.g. `http://127.0.0.1:11434/v1` for Ollama |
 | `KENFOLD_CHAT_MODEL` | `qwen3.5:4b` (`make up-extract` uses `kenfold-extract`, the same model with a thread limit) |
 | `KENFOLD_CHAT_API_KEY` | unset; sent as a bearer token to the chat API |
@@ -220,7 +263,7 @@ kenfold version
 | `KENFOLD_CLASSIFY` | on when a chat model is configured; types memories stored without one |
 | `KENFOLD_LOG_LEVEL` | `info` |
 
-The hook reads `KENFOLD_URL` (default `http://127.0.0.1:7077/mcp`), `KENFOLD_API_KEY` (unless `--key-file` is given), and `KENFOLD_STATE_DIR` (default `~/.local/state/kenfold`).
+The hook and `kenfold refs sync` read `KENFOLD_URL` (default `http://127.0.0.1:7077/mcp`; the REST API is at `/api/v1` next to it) and `KENFOLD_API_KEY` (unless `--key-file` is given); the hook also reads `KENFOLD_STATE_DIR` (default `~/.local/state/kenfold`).
 
 Changing `KENFOLD_EMBED_MODEL` to another 1024-dimensional model needs no migration: vector search only compares memories embedded by the configured model, and the server re-embeds the rest in the background (or run `kenfold reindex`).
 
@@ -228,9 +271,10 @@ Changing `KENFOLD_EMBED_MODEL` to another 1024-dimensional model needs no migrat
 
 ```sh
 make test               # unit tests + stdio end-to-end test (no database needed)
-make test-integration   # store, API key, migration, cross-agent, and handoff-scenario tests against the compose Postgres
+make test-integration   # store, API key, migration, cross-agent, handoff, and code-reference tests against the compose Postgres
 make lint               # gofmt + go vet
 make eval               # extraction quality against a real model (needs make up-extract)
+make eval-search        # retrieval quality per pipeline stage (needs make up-embed)
 make build              # ./bin/kenfold
 make logs | make down
 ```
@@ -240,14 +284,18 @@ Layout:
 ```
 cmd/kenfold/          CLI: serve, mcp, hook, admin commands; end-to-end tests
 internal/mcpserver/   MCP tool definitions (source of truth for the contract) and handlers
-internal/store/       PostgreSQL persistence and hybrid search
+internal/store/       PostgreSQL persistence, hybrid search, graph neighbors, code references
+internal/retrieve/    search pipeline (first stage, graph expansion, rerank, recency, staleness); eval corpus
+internal/rerank/      rerank API client (llama.cpp, Jina, Cohere, Voyage)
+internal/coderef/     code references: extraction from text, git + tree-sitter checks, sync client
+internal/restapi/     REST API (/api/v1) for non-agent clients
 internal/hook/        Claude Code / Codex session hook: context injection, capture, spool
 internal/extract/     model-based memory extraction and classification; eval set
 internal/chat/        OpenAI-compatible chat client (structured output)
 internal/secrets/     credential detection and redaction
 internal/apikey/      API keys and the bearer-token verifier
 internal/embed/       OpenAI-compatible embeddings client
-internal/httpserver/  HTTP routing, health probes, Host/CORS protection, auth
+internal/httpserver/  HTTP routing, health probes, Host/CORS protection, auth for /mcp and /api
 internal/memory/      domain types (memory types, trust, status, scopes, agent names)
 internal/config/      environment configuration
 migrations/           SQL migrations (goose, embedded in the binary)
@@ -262,6 +310,6 @@ docs/                 ADRs and specs
 | **1** ✅ | Real storage and hybrid search, API keys, CLI, Claude Code / Codex / OpenCode setup |
 | **2** ✅ | Secret filter, duplicate and contradiction hints, session hooks with automatic session summaries |
 | **2b** ✅ | Model-based extraction of memories from sessions (reviewed), type classification |
-| 3 | Graph relations, code indexing, commit-based invalidation, recency and graph ranking, rerank |
+| **3** ✅ | Rerank, graph expansion, recency and staleness in ranking, code references with commit-based invalidation (tree-sitter symbols), REST API |
 | 4 | OAuth 2.1, remote deployment, ChatGPT, object storage |
 | 5 | Consolidation, review dashboard, benchmarks |
