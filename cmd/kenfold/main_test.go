@@ -86,6 +86,9 @@ func runCLI(t *testing.T, env map[string]string, args ...string) (stdout, stderr
 
 func TestCLIUsageErrors(t *testing.T) {
 	for _, args := range [][]string{
+		{"export", "extra"},
+		{"import"},
+		{"import", "a", "b"},
 		{},
 		{"frobnicate"},
 		{"serve", "extra"},

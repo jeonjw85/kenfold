@@ -84,7 +84,7 @@ Constraints enforce the invariants that must never be violated by any writer: va
 | 2b | Model-based extraction of memories from session summaries (proposed for review by default) and type classification, with a local chat model (default `qwen3.5:4b`) | extracted memories measured on an internal eval set (dev + holdout; see `internal/extract/testdata/RESULTS.md`) |
 | 3 | Graph expansion, recency and staleness signals, rerank, code references with commit-based invalidation (tree-sitter symbols), REST API; see [ADR-0002](0002-retrieval-and-code-refs.md) | recall@5 ≥ 0.90 dev / ≥ 0.85 holdout on the internal eval set, never below the hybrid baseline |
 | 4 | OAuth 2.1 authorization server, remote deployment behind a tunnel or TLS proxy; object storage and an OpenAI-compatible proxy deferred (see [ADR-0003](0003-remote-access-and-oauth.md)) | recall works from ChatGPT. Verified with the MCP SDK's OAuth client over HTTPS and against ChatGPT's published client metadata; a real ChatGPT connection awaits a public deployment |
-| 5 | Consolidation workers, review dashboard, LongMemEval/LoCoMo evals, export/import | ongoing |
+| 5 | Export/import (done: JSON Lines archive without embeddings or credentials), consolidation workers, review dashboard, LongMemEval/LoCoMo evals | ongoing |
 
 ## Consequences
 

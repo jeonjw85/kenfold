@@ -56,6 +56,10 @@ Usage:
                                        check the code memories refer to against the repository's HEAD
   kenfold refs status [--scope S]      code reference states and memories that may be outdated
 
+  kenfold export [--out F] [--scope S] [--active]
+                                       write memories, their links, and code references to a JSON Lines archive
+  kenfold import [--dry-run] <F|->     import an archive (existing memories are kept; embeddings are recomputed)
+
   kenfold reindex                      embed memories missing an embedding for the configured model
   kenfold scan [--redact]              find (and remove) secrets stored before the secret filter
 
@@ -192,6 +196,10 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdin i
 		return c.refs(ctx, rest)
 	case "oauth":
 		return c.oauthCmd(ctx, rest)
+	case "export":
+		return c.export(ctx, rest)
+	case "import":
+		return c.importArchive(ctx, rest)
 	case "reindex":
 		if len(rest) > 0 {
 			return usageErr("reindex takes no arguments")

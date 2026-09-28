@@ -178,6 +178,16 @@ bin/kenfold memory approve <id>
 bin/kenfold memory forget <id> --reason "outdated"
 ```
 
+## Backup and moving to another server
+
+```sh
+docker compose exec -T kenfold /usr/local/bin/kenfold export > kenfold-backup.jsonl   # everything, including history
+bin/kenfold export --out backup.jsonl --scope github.com/org/repo --active            # one project, current memories only
+bin/kenfold import --dry-run backup.jsonl && bin/kenfold import backup.jsonl
+```
+
+An archive holds memories with their history, provenance, and timestamps, plus the links between them and their code references. It leaves out embeddings (the target re-embeds with its own model), API keys, and OAuth clients. Import keeps memories that already exist, so running it twice is harmless. It refuses the whole archive if it is incomplete or if any memory contains a secret. `--out` files are created readable by you only. The archive holds your memory in plain text: store it like the database.
+
 ## Search quality
 
 Measured with `make eval-search` on an internal corpus of 110 memories in three projects and 67 queries in Korean and English (details in [internal/retrieve/testdata/RESULTS.md](internal/retrieve/testdata/RESULTS.md)). Recall@5 is the share of the memories that answer a query found in the top 5.
@@ -237,6 +247,9 @@ kenfold oauth revoke <grant>         revoke an OAuth client and its tokens
 kenfold refs sync [--dir D] [--quiet]
                                      check the code memories refer to against the repository's HEAD
 kenfold refs status [--scope S]      code reference states and memories that may be outdated
+kenfold export [--out F] [--scope S] [--active]
+                                     write memories, their links, and code references to a JSON Lines archive
+kenfold import [--dry-run] <F|->     import an archive (existing memories are kept)
 kenfold reindex                      embed memories missing an embedding for the configured model
 kenfold scan [--redact]              find (and remove) secrets stored before the secret filter
 kenfold hook [--no-capture] [--no-refs]
@@ -329,4 +342,4 @@ docs/                 ADRs and specs
 | **2b** ✅ | Model-based extraction of memories from sessions (reviewed), type classification |
 | **3** ✅ | Rerank, graph expansion, recency and staleness in ranking, code references with commit-based invalidation (tree-sitter symbols), REST API |
 | **4** ✅ | OAuth 2.1 authorization server (client metadata documents, dynamic registration, `private_key_jwt`, read-only grants), remote deployment behind a tunnel or proxy; verified end to end with the MCP SDK's OAuth client over HTTPS, not yet from ChatGPT itself. Object storage and an OpenAI-compatible proxy were deferred ([ADR-0003](docs/adr/0003-remote-access-and-oauth.md)) |
-| 5 | Consolidation, review dashboard, benchmarks |
+| 5 | Export/import ✅; consolidation, review dashboard, public benchmarks (LongMemEval, LoCoMo) |
