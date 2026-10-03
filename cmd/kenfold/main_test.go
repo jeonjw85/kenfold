@@ -92,6 +92,7 @@ func TestCLIUsageErrors(t *testing.T) {
 		{},
 		{"frobnicate"},
 		{"serve", "extra"},
+		{"healthcheck", "extra"},
 		{"mcp", "extra"},
 		{"reindex", "extra"},
 		{"migrate", "sideways"},

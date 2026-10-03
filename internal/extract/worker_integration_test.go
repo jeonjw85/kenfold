@@ -126,6 +126,22 @@ func TestWorkerIntegration(t *testing.T) {
 		t.Error("summary processed twice")
 	}
 
+	// A retry repairs provenance if the memory was committed before the
+	// previous attempt failed to add its edge.
+	partialContent := "The retry test records provenance after a partial write."
+	partial, err := st.Create(ctx, store.CreateParams{Type: memory.TypeCodebase, Scope: scope, Content: partialContent,
+		SourceAgent: Agent, Trust: memory.TrustAgent, Confidence: 0.9, Status: memory.StatusProposed,
+		Attrs: map[string]any{"extracted_from": summary.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, skipped, err := w.store(ctx, summary, Candidate{Type: memory.TypeCodebase, Content: partialContent}); err != nil || !skipped {
+		t.Fatalf("retry partial write: skipped %v, error %v", skipped, err)
+	}
+	if from, err := st.DerivedFrom(ctx, partial.ID); err != nil || len(from) != 1 || from[0].ID != summary.ID {
+		t.Errorf("retry did not repair provenance: %v, %v", from, err)
+	}
+
 	// Default policy proposes everything.
 	sum2, _ := st.Create(ctx, store.CreateParams{Type: memory.TypeEpisodic, Scope: scope, Content: "Requests:\n- Use goose for migrations\nFinal response: Added goose.",
 		SourceAgent: "codex", Trust: memory.TrustAgent, Confidence: 0.5, Status: memory.StatusActive})

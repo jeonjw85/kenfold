@@ -97,6 +97,22 @@ func TestExtractValidation(t *testing.T) {
 	}
 }
 
+func TestExtractRedactsBeforeTruncation(t *testing.T) {
+	token := "ghp_" + strings.Repeat("Kd8", 12)
+	f := &fakeChat{answer: answer(item("project_rule", strings.Repeat("x", 180)+" "+token, "quoted evidence", "stated"))}
+	source := strings.Repeat("x", maxInputRunes-20) + " " + token
+	res, err := Extract(context.Background(), f, Source{Project: "github.com/o/r", Content: source}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(f.last.User, "ghp_") {
+		t.Errorf("model request contains a partial token: %q", f.last.User)
+	}
+	if len(res.Rejected) != 1 || strings.Contains(res.Rejected[0].Content, "ghp_") {
+		t.Errorf("rejection contains a partial token: %+v", res.Rejected)
+	}
+}
+
 func TestMinConfidenceDropsInferred(t *testing.T) {
 	f := &fakeChat{answer: answer(item("code_fact", "The login test raced on the session cookie.", "raced on the session cookie", "inferred"))}
 	res, _ := Extract(context.Background(), f, Source{Project: "p", Content: session}, Options{MinConfidence: 0.8})

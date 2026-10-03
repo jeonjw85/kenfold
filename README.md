@@ -12,7 +12,7 @@ ChatGPT ─────┤
 Local LLM ───┘
 ```
 
-What makes it different (see [ADR-0001](docs/adr/0001-architecture.md)):
+The main design choices (see [ADR-0001](docs/adr/0001-architecture.md)):
 
 - **Typed memory**: semantic, episodic, project, preference, codebase, temporary, each with its own lifecycle
 - **Provenance**: every memory records which agent wrote it (from its API key, not from what the client claims), when, and how far to trust it
@@ -20,7 +20,7 @@ What makes it different (see [ADR-0001](docs/adr/0001-architecture.md)):
 - **Handoff** between agents: stop in Claude Code, resume in Codex
 - **Poisoning-aware**: memory is served as data, never as instructions; preferences need your approval
 
-> **Status: Phase 5 in progress.** Shared storage, hybrid search with **reranking, graph expansion, and recency**, API keys, setup for Claude Code, Codex, and OpenCode, a server-side **secret filter**, duplicate and contradiction hints, **session hooks** that load memory at session start and record a summary at session end, optional **model-based extraction** that turns session summaries into memories for your review, **code references** that flag memories whose code changed or disappeared, and **remote access** with a built-in OAuth server for ChatGPT, claude.ai, and agents on other machines. Phase 5 has added **backups** (export and import), a **review dashboard** in the browser, and **consolidation**, which proposes to retire duplicate and contradicted memories and to digest old sessions.
+> **Status: Phase 5 in progress.** Shared storage, hybrid search, session hooks, memory extraction, code references, and OAuth remote access are implemented. Phase 5 adds export/import, a review dashboard, and consolidation. The LoCoMo and LongMemEval benchmark harness is ready (`make bench`); results are still pending.
 
 ## Quickstart
 
@@ -132,7 +132,7 @@ make up-extract                # up-embed plus qwen3.5:4b (first run downloads ~
 make review                    # go through proposed memories: approve, reject, or replace an old one
 ```
 
-Extracted memories are `proposed`: nothing is served to agents until you approve it, with `make review` or in the [dashboard](#dashboard). Each one shows the quote it came from and any existing memory it resembles; approving with "replace" retires the old one. A memory you reject is not proposed again. The same model also picks the type of memories that agents store without one; this adds about 6 seconds to such a `remember` call on CPU, and if the model takes longer than 15 seconds (while it loads, or is busy extracting) the default type is used.
+Extracted memories are `proposed`: nothing is served to agents until you approve it, with `make review` or in the [dashboard](#dashboard). Each one shows the quote it came from and any existing memory it resembles; approving with "replace" retires the old one. A memory you reject is not proposed again. If an agent omits the memory type, the same model chooses it. This adds about 6 seconds to a `remember` call on CPU. If the model takes longer than 15 seconds (while it loads, or is busy extracting), the default type is used.
 
 The model runs on CPU in Docker and takes 10–30 seconds per session, in the background. On CPUs with performance and efficiency cores, set `THREADS` to the number of performance cores (default 4; `make up-embed THREADS=6`): Ollama's default of one thread per core was 30–80× slower on an Apple M5, for embeddings as well as chat. Any OpenAI-compatible chat API works (`KENFOLD_CHAT_URL`, `KENFOLD_CHAT_MODEL`). Quality on the internal eval set is recorded in [internal/extract/testdata/RESULTS.md](internal/extract/testdata/RESULTS.md) (`make eval`).
 
@@ -140,7 +140,7 @@ The model runs on CPU in Docker and takes 10–30 seconds per session, in the ba
 
 ## Consolidation
 
-With a chat model configured (`make up-extract`), Kenfold also looks for memory that has piled up and proposes to clean it up:
+With a chat model configured (`make up-extract`), Kenfold proposes to retire duplicate or conflicting memories and summarize old sessions:
 
 - **Duplicates**: two memories where one says everything the other says, e.g. from two agents. The one that says more stays.
 - **Contradictions**: e.g. "use npm" and, later, "use pnpm, not npm". The newer one stays.
@@ -228,7 +228,7 @@ Measured with `make eval-search` on an internal corpus of 110 memories in three 
 | `make up-embed RERANK=0` | 0.90 | 0.90 | ~25 ms |
 | `make up-embed` (with reranker) | **0.96** | **0.96** | ~1.8 s |
 
-Times are the search inside Kenfold on an Apple M5 CPU, with the models warm.
+Search times were measured inside Kenfold on an Apple M5 CPU, with the models already loaded.
 
 The dev queries were used to tune the pipeline; the holdout queries were written afterwards by an independent author without access to the ranking code. This is a small, synthetic set: it shows the pipeline works as intended, not how it compares to other systems.
 
@@ -259,6 +259,7 @@ Full contract: [docs/mcp-tools.md](docs/mcp-tools.md).
 
 ```
 kenfold serve                        HTTP server (MCP at /mcp, /healthz, /readyz)
+kenfold healthcheck                  check the server and database schema (exit 1 if not ready)
 kenfold mcp                          MCP over stdio
 kenfold migrate [up|down|status]     database migrations
 kenfold key create <agent>           create an API key (printed once, to stdout)
@@ -299,6 +300,7 @@ kenfold version
 |---|---|
 | `KENFOLD_HTTP_ADDR` | `127.0.0.1:7077` |
 | `KENFOLD_DATABASE_URL` | `postgres://kenfold:kenfold@127.0.0.1:54329/kenfold?sslmode=disable` (compose database) |
+| `KENFOLD_DATABASE_PASSWORD` | unset; optional password override for a PostgreSQL URL, escaped automatically. Compose passes `KENFOLD_DB_PASSWORD` through this setting |
 | `KENFOLD_AUTO_MIGRATE` | `false` (`true` in compose); `serve` and `mcp` refuse to run on an outdated schema |
 | `KENFOLD_ALLOWED_HOSTS` | `localhost,127.0.0.1,::1`, the Host allowlist for `/mcp` |
 | `KENFOLD_AUTH` | `apikey`, or `none` |
@@ -334,13 +336,20 @@ Changing `KENFOLD_EMBED_MODEL` to another 1024-dimensional model needs no migrat
 
 ```sh
 make test               # unit tests + stdio end-to-end test (no database needed)
+make check              # gofmt, vet, race tests, build, vulnerability scan
 make test-integration   # store, API key, migration, cross-agent, handoff, code-reference, and OAuth tests against the compose Postgres
 make lint               # gofmt + go vet
 make eval               # extraction and consolidation quality against a real model (needs make up-extract)
 make eval-search        # retrieval quality per pipeline stage (needs make up-embed)
+make bench              # LoCoMo + LongMemEval_S subset (needs up-embed, KENFOLD_BENCH_CHAT_URL, KENFOLD_BENCH_API_KEY; BENCH_EXTRACT=0 skips the local extractor)
 make build              # ./bin/kenfold
 make logs | make down
 ```
+
+Set `KENFOLD_TEST_DATABASE_URL` to a throwaway PostgreSQL 18 + pgvector database
+before `make check` to include integration tests. Tests truncate its data and run
+packages sequentially. The GitHub Actions workflow runs these checks with its own
+database and builds the production container on every push and pull request.
 
 Layout:
 
@@ -356,6 +365,7 @@ internal/dashboard/   web dashboard for the owner: review, memories, clients (se
 internal/hook/        Claude Code / Codex session hook: context injection, capture, spool
 internal/extract/     model-based memory extraction and classification; eval set
 internal/consolidate/ consolidation proposals: duplicates, contradictions, digests of old sessions; eval set
+internal/bench/       LoCoMo and LongMemEval harness (datasets are cached, not committed)
 internal/chat/        OpenAI-compatible chat client (structured output)
 internal/secrets/     credential detection and redaction
 internal/apikey/      API keys and the bearer-token verifier
@@ -380,4 +390,4 @@ docs/                 ADRs and specs
 | **2b** ✅ | Model-based extraction of memories from sessions (reviewed), type classification |
 | **3** ✅ | Rerank, graph expansion, recency and staleness in ranking, code references with commit-based invalidation (tree-sitter symbols), REST API |
 | **4** ✅ | OAuth 2.1 authorization server (client metadata documents, dynamic registration, `private_key_jwt`, read-only grants), remote deployment behind a tunnel or proxy; verified end to end with the MCP SDK's OAuth client over HTTPS, not yet from ChatGPT itself. Object storage and an OpenAI-compatible proxy were deferred ([ADR-0003](docs/adr/0003-remote-access-and-oauth.md)) |
-| 5 | Export/import ✅, review dashboard ✅, consolidation ✅ ([ADR-0004](docs/adr/0004-consolidation.md)); public benchmarks (LongMemEval, LoCoMo) |
+| 5 | Export/import ✅, review dashboard ✅, consolidation ✅ ([ADR-0004](docs/adr/0004-consolidation.md)); public benchmarks (LongMemEval, LoCoMo): harness in `internal/bench` (`make bench`), results when run |

@@ -104,6 +104,23 @@ func TestJSONRequestShape(t *testing.T) {
 	}
 }
 
+func TestTextOmitsFormat(t *testing.T) {
+	f := &fakeAPI{content: "yes"}
+	c := client(t, f, func(c *Config) { c.Reasoning = ReasoningOmit })
+	got, usage, err := c.Text(context.Background(), "", "judge this", 10)
+	if err != nil || got != "yes" || usage.CompletionTokens != 7 {
+		t.Fatalf("Text = %q, %+v, %v", got, usage, err)
+	}
+	body := f.last.Load().(map[string]any)
+	if _, ok := body["response_format"]; ok {
+		t.Errorf("response_format = %v", body["response_format"])
+	}
+	msgs := body["messages"].([]any)
+	if len(msgs) != 1 || msgs[0].(map[string]any)["role"] != "user" {
+		t.Errorf("messages = %v", msgs)
+	}
+}
+
 func TestReasoningOmit(t *testing.T) {
 	f := &fakeAPI{content: `{"items":[]}`}
 	c := client(t, f, func(c *Config) { c.Reasoning = ReasoningOmit })

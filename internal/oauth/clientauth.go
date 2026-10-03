@@ -336,6 +336,9 @@ func (c *replayCache) use(key string, until, now time.Time) bool {
 	if t, ok := c.seen[key]; ok && now.Before(t) {
 		return false
 	}
+	if len(c.seen) >= maxReplayEntries {
+		return false // fail closed instead of letting verified clients grow it without bound
+	}
 	c.seen[key] = until
 	return true
 }
@@ -355,6 +358,15 @@ func (s *Server) authenticateClient(ctx context.Context, f url.Values, endpoint 
 		}
 		if err != nil {
 			return Client{}, err
+		}
+		// A metadata document can switch from public to private_key_jwt.
+		// Do not trust an old public-client record indefinitely at the token
+		// endpoint while authorization and JWT requests refresh its metadata.
+		if c.Kind == kindCIMD {
+			c, err = s.client(ctx, id)
+			if err != nil {
+				return Client{}, authFail("the client's metadata could not be loaded: %v", err)
+			}
 		}
 		if c.Metadata.authMethod() == authPrivateKeyJWT {
 			return Client{}, authFail("this client must authenticate with a client_assertion (private_key_jwt)")

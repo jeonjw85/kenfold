@@ -37,22 +37,30 @@ services:
         DATE: ${DATE:-unknown}
     image: kenfold:dev
     environment:
-      KENFOLD_DATABASE_URL: postgres://kenfold:${KENFOLD_DB_PASSWORD:-kenfold}@postgres:5432/kenfold?sslmode=disable
+      KENFOLD_DATABASE_URL: postgres://kenfold@postgres:5432/kenfold?sslmode=disable
+      KENFOLD_DATABASE_PASSWORD: ${KENFOLD_DB_PASSWORD:-kenfold}
       KENFOLD_AUTO_MIGRATE: "true"
       # Every /mcp request needs "Authorization: Bearer <key>"; create keys with `make key AGENT=...`.
       KENFOLD_AUTH: ${KENFOLD_AUTH:-apikey}
+      KENFOLD_ALLOWED_HOSTS: ${KENFOLD_ALLOWED_HOSTS:-}
       # Embeddings are off unless KENFOLD_EMBED_URL is set. `make up-embed` points it at the
       # ollama service; for Ollama running natively on the host use http://host.docker.internal:11434/v1.
       KENFOLD_EMBED_URL: ${KENFOLD_EMBED_URL:-}
       KENFOLD_EMBED_MODEL: ${KENFOLD_EMBED_MODEL:-bge-m3}
       KENFOLD_EMBED_NAME: ${KENFOLD_EMBED_NAME:-}
       KENFOLD_EMBED_API_KEY: ${KENFOLD_EMBED_API_KEY:-}
+      KENFOLD_EMBED_DIMENSIONS: ${KENFOLD_EMBED_DIMENSIONS:-false}
+      KENFOLD_SEARCH_MAX_DISTANCE: ${KENFOLD_SEARCH_MAX_DISTANCE:-0.55}
       # Memory extraction and classification are off unless KENFOLD_CHAT_URL is set
       # (`make up-extract` points it at the ollama service).
       KENFOLD_CHAT_URL: ${KENFOLD_CHAT_URL:-}
       KENFOLD_CHAT_MODEL: ${KENFOLD_CHAT_MODEL:-qwen3.5:4b}
       KENFOLD_CHAT_API_KEY: ${KENFOLD_CHAT_API_KEY:-}
+      KENFOLD_CHAT_REASONING: ${KENFOLD_CHAT_REASONING:-none}
+      KENFOLD_EXTRACT: ${KENFOLD_EXTRACT:-}
       KENFOLD_EXTRACT_POLICY: ${KENFOLD_EXTRACT_POLICY:-propose}
+      KENFOLD_CLASSIFY: ${KENFOLD_CLASSIFY:-}
+      KENFOLD_CONSOLIDATE: ${KENFOLD_CONSOLIDATE:-}
       # Reranking is off unless KENFOLD_RERANK_URL is set (`make up-embed` points it at the reranker service).
       KENFOLD_RERANK_URL: ${KENFOLD_RERANK_URL:-}
       KENFOLD_RERANK_MODEL: ${KENFOLD_RERANK_MODEL:-bge-reranker-v2-m3}
@@ -62,6 +70,7 @@ services:
       KENFOLD_PUBLIC_URL: ${KENFOLD_PUBLIC_URL:-}
       KENFOLD_OAUTH: ${KENFOLD_OAUTH:-}
       KENFOLD_OAUTH_DCR: ${KENFOLD_OAUTH_DCR:-}
+      KENFOLD_DASHBOARD: ${KENFOLD_DASHBOARD:-local}
       KENFOLD_LOG_LEVEL: ${KENFOLD_LOG_LEVEL:-info}
     ports:
       - "127.0.0.1:7077:7077"
@@ -71,6 +80,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/kenfold", "healthcheck"]
+      interval: 10s
+      timeout: 6s
+      retries: 6
+      start_period: 10s
     restart: unless-stopped
 
   # Optional local embedding server. Started only with the "embed" profile.

@@ -120,7 +120,7 @@ func (w *Worker) RunOnce(ctx context.Context) (Outcome, bool, error) {
 		}
 		out.Stored = append(out.Stored, m)
 	}
-	if err := w.Store.FinishExtraction(ctx, src.ID, len(res.Candidates), len(out.Stored)); err != nil {
+	if err := w.Store.FinishExtraction(ctx, src.ID, job.Attempts, len(res.Candidates), len(out.Stored)); err != nil {
 		return out, true, fmt.Errorf("finish: %w", err)
 	}
 	w.Logger.InfoContext(ctx, "extracted memories from a session summary",
@@ -136,7 +136,14 @@ func (w *Worker) store(ctx context.Context, src store.Memory, c Candidate) (stor
 	if c.UserScope {
 		scope = memory.ScopeUser
 	}
-	if _, err := w.Store.SeenContent(ctx, scope, c.Content); err == nil {
+	if seen, err := w.Store.SeenContent(ctx, scope, c.Content); err == nil {
+		// A previous attempt may have committed the memory and then failed
+		// to write its provenance edge. Repair that edge before skipping it.
+		if seen.SourceAgent == Agent && seen.Attrs["extracted_from"] == src.ID {
+			if err := w.Store.AddEdge(ctx, seen.ID, "derived_from", src.ID, Agent); err != nil {
+				return store.Memory{}, false, err
+			}
+		}
 		return store.Memory{}, true, nil
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return store.Memory{}, false, err
@@ -217,7 +224,7 @@ func (w *Worker) fail(ctx context.Context, job store.ExtractionJob, cause error)
 	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	msg := cause.Error()
-	if err := w.Store.FailExtraction(fctx, job.Source.ID, msg, retryAt); err != nil {
+	if err := w.Store.FailExtraction(fctx, job.Source.ID, job.Attempts, msg, retryAt); err != nil {
 		return fmt.Errorf("record failure: %w", err)
 	}
 	return nil

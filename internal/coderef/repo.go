@@ -220,7 +220,7 @@ func (c *checker) check(ctx context.Context, t Target) (res Result, ok bool, err
 // answer may be incomplete.
 func (r *Repo) findDefinitions(ctx context.Context, contents map[string][]byte, symbol string) (paths []string, defs [][]string, complete bool, err error) {
 	_, name := splitSymbol(symbol)
-	outb, err := git(ctx, r.root, nil, "grep", "-l", "-w", "-F", "-I", "--full-name", "-e", name, "HEAD", "--")
+	outb, err := git(ctx, r.root, nil, "grep", "-l", "-w", "-F", "-I", "--full-name", "-e", name, r.head, "--")
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && ee.ExitCode() == 1 && ctx.Err() == nil {
@@ -231,7 +231,7 @@ func (r *Repo) findDefinitions(ctx context.Context, contents map[string][]byte, 
 	complete = true
 	var candidates []string
 	for _, line := range strings.Split(strings.TrimSpace(string(outb)), "\n") {
-		p := strings.TrimPrefix(line, "HEAD:")
+		p := strings.TrimPrefix(line, r.head+":")
 		if p == "" || p == line {
 			continue
 		}
@@ -278,7 +278,7 @@ func symbolHash(paths []string, defs [][]string) string {
 }
 
 func (r *Repo) isAncestor(ctx context.Context, commit string) bool {
-	_, err := git(ctx, r.root, nil, "merge-base", "--is-ancestor", commit, "HEAD")
+	_, err := git(ctx, r.root, nil, "merge-base", "--is-ancestor", commit, r.head)
 	return err == nil
 }
 
@@ -311,7 +311,7 @@ func (r *Repo) blobs(ctx context.Context, paths []string) (map[string]string, er
 	out := map[string]string{}
 	for start := 0; start < len(paths); start += 200 {
 		batch := paths[start:min(start+200, len(paths))]
-		outb, err := git(ctx, r.root, nil, append([]string{"ls-tree", "-z", "--full-tree", "HEAD", "--"}, batch...)...)
+		outb, err := git(ctx, r.root, nil, append([]string{"ls-tree", "-z", "--full-tree", r.head, "--"}, batch...)...)
 		if err != nil {
 			return nil, fmt.Errorf("git ls-tree: %w", err)
 		}
@@ -334,7 +334,7 @@ func (r *Repo) content(ctx context.Context, contents map[string][]byte, p string
 	if b, ok := contents[p]; ok {
 		return b, nil
 	}
-	outb, err := git(ctx, r.root, strings.NewReader("HEAD:"+p+"\n"), "cat-file", "--batch")
+	outb, err := git(ctx, r.root, strings.NewReader(r.head+":"+p+"\n"), "cat-file", "--batch")
 	if err != nil {
 		return nil, fmt.Errorf("git cat-file: %w", err)
 	}

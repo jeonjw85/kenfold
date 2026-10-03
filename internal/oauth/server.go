@@ -546,7 +546,7 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	}
 	switch f.Get("grant_type") {
 	case "authorization_code":
-		rec, err := s.store.useCode(r.Context(), f.Get("code"))
+		rec, err := s.store.useCode(r.Context(), f.Get("code"), clientID, f.Get("redirect_uri"))
 		switch {
 		case errors.Is(err, errReuse):
 			s.log.WarnContext(r.Context(), "oauth authorization code reused; grant revoked", "client_id", clientID)
@@ -557,10 +557,6 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 			return
 		case err != nil:
 			s.serverError(w, r, "token", err)
-			return
-		}
-		if rec.grant.ClientID != clientID || rec.redirectURI != f.Get("redirect_uri") {
-			oauthError(w, http.StatusBadRequest, "invalid_grant", "client_id or redirect_uri does not match the authorization request")
 			return
 		}
 		if !pkceMatches(f.Get("code_verifier"), rec.challenge) {
@@ -574,7 +570,7 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		}
 		writeTokens(w, t)
 	case "refresh_token":
-		t, err := s.store.refresh(r.Context(), clientID, f.Get("refresh_token"))
+		t, err := s.store.refresh(r.Context(), clientID, f.Get("refresh_token"), f.Get("scope"))
 		switch {
 		case errors.Is(err, errReuse):
 			s.log.WarnContext(r.Context(), "oauth refresh token reused; grant revoked", "client_id", clientID)
@@ -583,13 +579,11 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, errInvalid):
 			oauthError(w, http.StatusBadRequest, "invalid_grant", "invalid or expired refresh token")
 			return
+		case errors.Is(err, errInvalidScope):
+			oauthError(w, http.StatusBadRequest, "invalid_scope", "a refresh cannot exceed the token's granted scopes")
+			return
 		case err != nil:
 			s.serverError(w, r, "token", err)
-			return
-		}
-		if want := authz.Normalize(f.Get("scope")); len(want) > 0 && !subset(want, t.Scopes) {
-			// Narrowing on refresh is not supported; widening never is.
-			oauthError(w, http.StatusBadRequest, "invalid_scope", "a refresh cannot change the granted scopes")
 			return
 		}
 		writeTokens(w, t)

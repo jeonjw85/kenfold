@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"strings"
 	"testing"
@@ -213,6 +214,23 @@ func TestReplayCache(t *testing.T) {
 	}
 	if !c.use("a", now.Add(3*time.Minute), now.Add(2*time.Minute)) {
 		t.Error("reuse after expiry rejected")
+	}
+}
+
+func TestReplayCacheBound(t *testing.T) {
+	now := time.Now()
+	c := replayCache{seen: make(map[string]time.Time, maxReplayEntries)}
+	for i := 0; i < maxReplayEntries; i++ {
+		c.seen[fmt.Sprint(i)] = now.Add(time.Minute)
+	}
+	if c.use("overflow", now.Add(time.Minute), now) {
+		t.Error("full replay cache accepted a new assertion")
+	}
+	if len(c.seen) != maxReplayEntries {
+		t.Errorf("replay cache grew past its limit: %d", len(c.seen))
+	}
+	if !c.use("after-expiry", now.Add(3*time.Minute), now.Add(2*time.Minute)) {
+		t.Error("expired entries were not reclaimed")
 	}
 }
 

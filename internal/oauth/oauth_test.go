@@ -64,13 +64,16 @@ func TestRedirectURIs(t *testing.T) {
 	}
 	reg := []string{"https://app.example/cb", "http://127.0.0.1/callback"}
 	for req, ok := range map[string]bool{
-		"https://app.example/cb":           true,
-		"https://app.example/cb/":          false,
-		"https://app.example/cb?x=1":       false,
-		"http://127.0.0.1:54321/callback":  true, // loopback: any port
-		"http://127.0.0.1:54321/other":     false,
-		"http://localhost:54321/callback":  false, // host must match
-		"https://127.0.0.1:54321/callback": false,
+		"https://app.example/cb":                   true,
+		"https://app.example/cb/":                  false,
+		"https://app.example/cb?x=1":               false,
+		"http://127.0.0.1:54321/callback":          true, // loopback: any port
+		"http://127.0.0.1:54321/other":             false,
+		"http://localhost:54321/callback":          false, // host must match
+		"https://127.0.0.1:54321/callback":         false,
+		"http://user@127.0.0.1:54321/callback":     false,
+		"http://127.0.0.1:54321/callback#fragment": false,
+		"http://127.0.0.1:54321/%63allback":        false,
 	} {
 		if got := redirectMatches(reg, req); got != ok {
 			t.Errorf("redirectMatches(%q) = %v", req, got)

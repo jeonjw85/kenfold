@@ -166,7 +166,8 @@ func Extract(ctx context.Context, c Chat, src Source, o Options) (Result, error)
 	}
 	// Session summaries are already redacted by the hook; redact again in case
 	// the source is an older or hand-written memory.
-	content, _ = secrets.Redact(truncate(content, maxInputRunes))
+	content, _ = secrets.Redact(content)
+	content = truncate(content, maxInputRunes)
 	project := src.Project
 	if project == "" {
 		project = "(none: user-wide session)"
@@ -192,8 +193,8 @@ func validate(in []rawItem, hasProject bool, source string, o Options) ([]Candid
 	seen := map[string]bool{}
 	quoted := quotedSpans(source)
 	reject := func(m rawItem, reason string) {
-		c, _ := secrets.Redact(truncate(strings.TrimSpace(m.Content), 200))
-		rej = append(rej, Rejection{Content: c, Reason: reason})
+		c, _ := secrets.Redact(strings.TrimSpace(m.Content))
+		rej = append(rej, Rejection{Content: truncate(c, 200), Reason: reason})
 	}
 	for _, m := range in {
 		content := strings.Join(strings.Fields(m.Content), " ")

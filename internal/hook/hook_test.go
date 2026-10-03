@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -309,6 +310,10 @@ func TestInputHandling(t *testing.T) {
 	if err := Run(context.Background(), strings.NewReader("not json"), &out, h.opts); err == nil {
 		t.Error("invalid JSON accepted")
 	}
+	oversized := `{"hook_event_name":"PreToolUse"}` + strings.Repeat(" ", maxInputBytes)
+	if err := Run(context.Background(), strings.NewReader(oversized), &out, h.opts); err == nil {
+		t.Error("oversized input with a valid JSON prefix accepted")
+	}
 	if err := Run(context.Background(), strings.NewReader(`{"session_id":"x"}`), &out, h.opts); err == nil {
 		t.Error("missing hook_event_name accepted")
 	}
@@ -323,6 +328,41 @@ func TestInputHandling(t *testing.T) {
 	// Session end with no log and no repo is a no-op.
 	if err := Run(context.Background(), strings.NewReader(`{"hook_event_name":"SessionEnd","session_id":"none","cwd":"/nonexistent"}`), &out, h.opts); err != nil {
 		t.Errorf("empty session end: %v", err)
+	}
+}
+
+func TestCaptureRedactsBeforeTruncation(t *testing.T) {
+	h := newHarness(t, "http://127.0.0.1:1/mcp")
+	const sid = "redaction-boundary"
+	secret := "ghp_" + strings.Repeat("Zq8", 12)
+	text := strings.Repeat("x", maxStoredRunes-20) + " " + secret
+	if _, err := h.run(map[string]any{"hook_event_name": "UserPromptSubmit", "session_id": sid, "prompt": text}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := (state{dir: h.opts.StateDir}).read(sid)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("read captured event: %v, %v", events, err)
+	}
+	if strings.Contains(events[0].Text, "ghp_") || utf8.RuneCountInString(events[0].Text) > maxStoredRunes {
+		t.Errorf("captured text contains a partial token or exceeds the limit: %q", events[0].Text)
+	}
+}
+
+func TestHookRejectsCrossOriginAuthenticatedRedirect(t *testing.T) {
+	f := newFakeServer(t)
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, f.srv.URL, http.StatusTemporaryRedirect)
+	}))
+	defer source.Close()
+	c := newClient(Options{URL: source.URL, APIKey: "kf_redirect-secret", ClientName: "test"})
+	defer c.close()
+	if _, err := c.connect(context.Background()); err == nil || !strings.Contains(err.Error(), "different origin") {
+		t.Fatalf("cross-origin redirect was not refused: %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.auth) != 0 {
+		t.Errorf("redirect target received %d requests with Authorization %v", len(f.auth), f.auth)
 	}
 }
 
@@ -351,6 +391,19 @@ func TestBuildSummary(t *testing.T) {
 	}
 	if one := buildSummary([]event{{Time: t0, Kind: kindPrompt, Text: "only"}}, t0); !strings.HasPrefix(one, "Session summary: 1 request,") {
 		t.Errorf("singular: %q", one)
+	}
+}
+
+func TestBuildSummaryRedactsBeforeSectionTruncation(t *testing.T) {
+	secret := "ghp_" + strings.Repeat("Zq8", 12)
+	for _, kind := range []string{kindPrompt, kindResponse, kindCompact} {
+		t.Run(kind, func(t *testing.T) {
+			limit := map[string]int{kindPrompt: maxPromptRunes, kindResponse: maxResponseRunes, kindCompact: maxCompactRunes}[kind]
+			events := []event{{Kind: kindPrompt, Text: "request"}, {Kind: kind, Text: strings.Repeat("x", limit-20) + " " + secret}}
+			if summary := buildSummary(events, time.Now()); strings.Contains(summary, "ghp_") {
+				t.Errorf("summary contains a partial token: %q", summary)
+			}
+		})
 	}
 }
 

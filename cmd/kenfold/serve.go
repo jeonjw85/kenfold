@@ -203,7 +203,16 @@ func httpHandler(cfg config.Config, rt *runtime, logger *slog.Logger) http.Handl
 		opts.OAuth = rt.oauth.Routes
 		opts.ResourceMetadataURL = rt.oauth.ResourceMetadataURL()
 	}
-	return httpserver.New(mcpserver.New(buildinfo.Version, deps), rt.pool, logger, opts)
+	return httpserver.New(mcpserver.New(buildinfo.Version, deps), schemaReadiness{cfg.DatabaseURL}, logger, opts)
+}
+
+// A recovered database is only ready after its schema matches the binary.
+// serve may have started while the database was unreachable, and a successful
+// connection alone does not mean its tool queries can run.
+type schemaReadiness struct{ databaseURL string }
+
+func (s schemaReadiness) Ping(ctx context.Context) error {
+	return migrations.CheckCurrent(ctx, s.databaseURL)
 }
 
 func (c *cli) serve(ctx context.Context) error {

@@ -188,6 +188,37 @@ func TestValidTargetRules(t *testing.T) {
 	}
 }
 
+func TestRepoCheckUsesOpenedCommit(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("jobs/workers.go", "package jobs\n\nfunc Register() {}\n")
+	opened := r.commit("before")
+	repo, err := Open(context.Background(), r.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := []Target{{Path: "jobs/workers.go"}, {Path: "jobs/workers.go", Symbol: "Register"}, {Symbol: "Register"}}
+	before, err := repo.Check(context.Background(), targets)
+	if err != nil || len(before) != len(targets) {
+		t.Fatalf("initial check: %+v, %v", before, err)
+	}
+	r.write("jobs/workers.go", "package jobs\n\nfunc Replacement() {}\n")
+	later := r.commit("after")
+	// Even if HEAD moves after Open, every result must match the commit
+	// Sync will report, including symbol search and ancestry decisions.
+	after, err := repo.Check(context.Background(), append(targets, Target{Path: "jobs/workers.go", AnchorCommit: later}))
+	if err != nil || len(after) != len(before) {
+		t.Fatalf("check after HEAD moved: %+v, %v", after, err)
+	}
+	if repo.Head() != opened {
+		t.Fatalf("opened commit = %q, want %q", repo.Head(), opened)
+	}
+	for i := range before {
+		if after[i] != before[i] {
+			t.Errorf("target %v changed when HEAD moved: got %+v, want %+v", targets[i], after[i], before[i])
+		}
+	}
+}
+
 func TestRepoCheckIncomplete(t *testing.T) {
 	r := newTestRepo(t)
 	r.write("jobs/workers.go", "package jobs\n\nfunc Register() {}\n")

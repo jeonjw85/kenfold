@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -213,6 +214,11 @@ func (s *Store) Import(ctx context.Context, fn func(*Importer) error) (ImportSum
 
 // Add imports one record.
 func (im *Importer) Add(ctx context.Context, r ArchiveRecord) error {
+	if r.Memory == nil {
+		if err := im.finish(ctx); err != nil {
+			return err
+		}
+	}
 	switch {
 	case r.Memory != nil:
 		return im.addMemory(ctx, *r.Memory)
@@ -240,6 +246,18 @@ func (im *Importer) Add(ctx context.Context, r ArchiveRecord) error {
 		f := r.Ref
 		if !ValidID(f.MemoryID) {
 			return ErrInvalidID
+		}
+		var scope string
+		err := im.tx.QueryRow(ctx, `SELECT scope FROM memory WHERE id = $1`, f.MemoryID).Scan(&scope)
+		if errors.Is(err, pgx.ErrNoRows) {
+			im.sum.Skipped++
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if f.Scope != scope {
+			return fmt.Errorf("import code reference: scope %q does not match memory scope %q", f.Scope, scope)
 		}
 		tag, err := im.tx.Exec(ctx, `
 			INSERT INTO memory_ref (memory_id, scope, path, symbol, state, resolved_path, anchor_hash, anchor_commit, checked_commit, checked_at, created_at)
@@ -273,8 +291,17 @@ func (im *Importer) addMemory(ctx context.Context, m ArchivedMemory) error {
 			return err
 		}
 		if !ok {
+			// An existing id must stay untouched, including its supersedes
+			// pointer, even when the archive's target is absent here.
+			if err := im.tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM memory WHERE id = $1)`, m.ID).Scan(&ok); err != nil {
+				return err
+			}
+			if ok {
+				im.sum.Existing++
+				return nil
+			}
 			im.pending = append(im.pending, m)
-			sup = nil
+			return nil
 		}
 	}
 	attrs := m.Attrs
@@ -299,14 +326,36 @@ func (im *Importer) addMemory(ctx context.Context, m ArchivedMemory) error {
 	return nil
 }
 
-// finish links supersedes pointers that arrived before their target and
-// restores updated_at (the touch trigger overwrites it on update).
+// finish inserts memories whose supersedes target arrived later. Inserting
+// them after their target preserves archived timestamps: linking a placeholder
+// with UPDATE would fire the touch trigger and replace updated_at.
 func (im *Importer) finish(ctx context.Context) error {
-	for _, m := range im.pending {
-		if _, err := im.tx.Exec(ctx, `
-			UPDATE memory SET supersedes = $2, updated_at = $3
-			WHERE id = $1 AND supersedes IS NULL AND EXISTS (SELECT 1 FROM memory WHERE id = $2)`, m.ID, *m.Supersedes, m.UpdatedAt); err != nil {
-			return fmt.Errorf("link supersedes: %w", err)
+	for len(im.pending) > 0 {
+		pending := im.pending
+		im.pending = nil
+		ids := make(map[string]bool, len(pending))
+		for _, m := range pending {
+			ids[strings.ToLower(m.ID)] = true
+		}
+		for _, m := range pending {
+			var exists bool
+			if err := im.tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM memory WHERE id = $1)`, *m.Supersedes).Scan(&exists); err != nil {
+				return err
+			}
+			if !exists {
+				if ids[strings.ToLower(*m.Supersedes)] {
+					im.pending = append(im.pending, m)
+					continue
+				}
+				// A scope/status-filtered export may leave out the old memory.
+				m.Supersedes = nil
+			}
+			if err := im.addMemory(ctx, m); err != nil {
+				return err
+			}
+		}
+		if len(im.pending) == len(pending) {
+			return errors.New("archive contains a supersedes cycle")
 		}
 	}
 	return nil

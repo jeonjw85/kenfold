@@ -29,6 +29,7 @@ const usage = `Kenfold: one memory for all your AI agents.
 
 Usage:
   kenfold serve                        run the HTTP server (MCP at /mcp)
+  kenfold healthcheck                  check the running server and database readiness
   kenfold mcp                          run the MCP server over stdio
   kenfold migrate [up|down|status]     manage the database schema
 
@@ -77,6 +78,7 @@ Usage:
 Environment:
   KENFOLD_HTTP_ADDR            listen address             (default ` + config.DefaultHTTPAddr + `)
   KENFOLD_DATABASE_URL         PostgreSQL URL             (default: local compose database)
+  KENFOLD_DATABASE_PASSWORD    optional password override (URL-escaped automatically)
   KENFOLD_AUTO_MIGRATE         migrate on serve           (default false)
   KENFOLD_ALLOWED_HOSTS        Host allowlist for /mcp    (default localhost,127.0.0.1,::1)
   KENFOLD_PUBLIC_URL           https URL remote clients reach Kenfold at, e.g. https://kenfold.example.com
@@ -186,6 +188,11 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdin i
 			return usageErr("serve takes no arguments")
 		}
 		return c.serve(ctx)
+	case "healthcheck":
+		if len(rest) > 0 {
+			return usageErr("healthcheck takes no arguments")
+		}
+		return c.healthcheck(ctx)
 	case "mcp":
 		if len(rest) > 0 {
 			return usageErr("mcp takes no arguments")

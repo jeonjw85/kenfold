@@ -2,9 +2,33 @@ package config
 
 import (
 	"log/slog"
+	"net/url"
 	"slices"
+	"strings"
 	"testing"
 )
+
+func TestDatabasePasswordEscaping(t *testing.T) {
+	password := "secure:@/#?%&=' password"
+	c, err := LoadFrom(env(map[string]string{
+		"KENFOLD_DATABASE_URL":      "postgres://kenfold@postgres:5432/kenfold?sslmode=disable",
+		"KENFOLD_DATABASE_PASSWORD": password,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(c.DatabaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := u.User.Password()
+	if got != password || u.Host != "postgres:5432" || u.Path != "/kenfold" || u.RawQuery != "sslmode=disable" {
+		t.Fatal("password changed the database URL structure or did not round-trip")
+	}
+	if _, err := LoadFrom(env(map[string]string{"KENFOLD_DATABASE_URL": "invalid", "KENFOLD_DATABASE_PASSWORD": password})); err == nil || strings.Contains(err.Error(), password) {
+		t.Fatal("invalid password configuration accepted or leaked its value")
+	}
+}
 
 func env(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }

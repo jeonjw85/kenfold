@@ -114,9 +114,12 @@ func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, o Options) erro
 	if o.StateDir == "" {
 		return errors.New("no state directory")
 	}
-	raw, err := io.ReadAll(io.LimitReader(stdin, maxInputBytes))
+	raw, err := io.ReadAll(io.LimitReader(stdin, maxInputBytes+1))
 	if err != nil {
 		return fmt.Errorf("read hook input: %w", err)
+	}
+	if len(raw) > maxInputBytes {
+		return errors.New("hook input is too large")
 	}
 	var in Input
 	if err := json.Unmarshal(raw, &in); err != nil {
@@ -232,8 +235,8 @@ func (r *runner) capture(kind, text string) error {
 	if !r.o.Capture || r.in.SessionID == "" || strings.TrimSpace(text) == "" {
 		return nil
 	}
-	clean, _ := secrets.Redact(truncate(strings.TrimSpace(text), maxStoredRunes))
-	return r.st.append(r.in.SessionID, event{Time: r.o.Now(), Kind: kind, Text: clean})
+	clean, _ := secrets.Redact(strings.TrimSpace(text))
+	return r.st.append(r.in.SessionID, event{Time: r.o.Now(), Kind: kind, Text: truncate(clean, maxStoredRunes)})
 }
 
 // ---- SessionEnd ----

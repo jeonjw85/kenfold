@@ -1,0 +1,43 @@
+name: Release checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg18-trixie
+        env:
+          POSTGRES_USER: kenfold
+          POSTGRES_PASSWORD: kenfold
+          POSTGRES_DB: kenfold_test
+        ports:
+          - 54329:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U kenfold -d kenfold_test"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      KENFOLD_TEST_DATABASE_URL: postgres://kenfold:kenfold@127.0.0.1:54329/kenfold_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: go.sum
+      - run: make check
+      - name: Build the production container
+        run: docker build -t kenfold:ci .

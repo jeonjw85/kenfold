@@ -62,7 +62,10 @@ func TestConsolidationStoreIntegration(t *testing.T) {
 	t2 := mk(memory.TypeCodebase, scope, "The webhook handler dedupes events by event_id in handler.go now.", nil)
 	mk(memory.TypeCodebase, "project:ex/other", "The webhook handler dedupes events by event_id in handler.go.", nil) // another scope
 	mk(memory.TypeEpisodic, scope, "Session: used pnpm, not npm, to install packages.", axis(0, 0))                   // episodic
-	before := time.Now()
+	var before time.Time
+	if err := pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
 	time.Sleep(5 * time.Millisecond)
 	mk(memory.TypeProject, scope, "Packages are installed with pnpm, never npm.", axis(0, 0.05)) // not settled
 

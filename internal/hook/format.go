@@ -83,6 +83,9 @@ func buildSummary(events []event, end time.Time) string {
 	var start time.Time
 	var branch, response, compact string
 	for _, e := range events {
+		// Redact before shortening individual sections; a partial token may
+		// no longer match its credential format after truncation.
+		e.Text, _ = secrets.Redact(e.Text)
 		if start.IsZero() || (!e.Time.IsZero() && e.Time.Before(start)) {
 			start = e.Time
 		}
@@ -139,8 +142,8 @@ func buildSummary(events []event, end time.Time) string {
 	if c := truncate(collapse(compact), maxCompactRunes); c != "" {
 		b.WriteString("Summary at compaction:\n" + c + "\n")
 	}
-	out, _ := secrets.Redact(truncate(strings.TrimSpace(b.String()), maxSummaryRunes))
-	return out
+	out, _ := secrets.Redact(strings.TrimSpace(b.String()))
+	return truncate(out, maxSummaryRunes)
 }
 
 func timeRange(start, end time.Time) string {

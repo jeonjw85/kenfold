@@ -29,6 +29,29 @@ The public URL leads to your whole memory store. Everything is authenticated, bu
 4. **Approve only connections you started.** The consent page shows the client's id and the host you are sent back to after approval (for ChatGPT, `chatgpt.com`; for claude.ai, `claude.ai`). Deny if either is unexpected: anyone can name a client "ChatGPT" and send you a link.
 5. **Back up the database** (the `pgdata` volume) if losing memories would hurt.
 
+Before a release, run `make check` with `KENFOLD_TEST_DATABASE_URL` pointing to a
+throwaway PostgreSQL 18 + pgvector database. It runs formatting, vet, uncached
+tests with the race detector, a binary build, and the Go vulnerability scanner.
+Without that variable, database integration tests are skipped. The tests truncate
+data, so use a separate database from your live memory store.
+
+Compose checks Kenfold with `kenfold healthcheck`; `up --wait` waits until the
+HTTP server can reach a database with the current schema. `/healthz` checks the
+process and `/readyz` checks database/schema readiness. Optional model outages
+do not make it unready because search can fall back to full-text.
+
+Use one Kenfold server replica for this release. OAuth consent signing, JWT
+replay protection, and dashboard sessions are held in process memory; restarting
+ends dashboard sessions. Multiple replicas also need coordination for extraction
+candidate writes after a worker lease expires. The shipped Compose setup runs
+one replica. Confirm actual ChatGPT/claude.ai OAuth connection through your public
+HTTPS URL before opening access to users; the automated tests use SDK clients.
+
+For a new database, `KENFOLD_DB_PASSWORD` may contain URL punctuation: Compose
+passes it separately and Kenfold escapes it. For a host CLI connecting to that
+database, set `KENFOLD_DATABASE_PASSWORD` to the same value. Changing the variable
+does not change the password inside an existing Postgres data volume.
+
 ## The dashboard stays local
 
 Setting `KENFOLD_PUBLIC_URL` does not publish the dashboard. `/dashboard/` answers only for `localhost` and loopback addresses, and it refuses requests that carry proxy headers such as `X-Forwarded-For`, so it is not reachable through the public URL or through a tunnel that rewrites the `Host` header. To use it from another machine, forward the port over SSH and open `http://127.0.0.1:7077/dashboard/`:

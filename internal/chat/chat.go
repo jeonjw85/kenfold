@@ -74,6 +74,21 @@ func New(cfg Config) (*Client, error) {
 	if hc == nil {
 		hc = &http.Client{Timeout: cfg.Timeout}
 	}
+	copied := *hc
+	checkRedirect := hc.CheckRedirect
+	copied.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) > 0 && (req.URL.Scheme != via[0].URL.Scheme || !strings.EqualFold(req.URL.Host, via[0].URL.Host)) {
+			return errors.New("refusing to redirect a model API request to a different origin")
+		}
+		if checkRedirect != nil {
+			return checkRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	hc = &copied
 	u.Path = strings.TrimSuffix(u.Path, "/") + "/chat/completions"
 	return &Client{endpoint: u.String(), cfg: cfg, http: hc}, nil
 }
@@ -134,16 +149,7 @@ type wireResponse struct {
 // JSON runs a completion and decodes the model's JSON answer into out. It
 // returns the raw content (for diagnostics) and token usage.
 func (c *Client) JSON(ctx context.Context, r Request, out any) (string, Usage, error) {
-	body := wireRequest{
-		Model:       c.cfg.Model,
-		Messages:    []Message{{Role: "system", Content: r.System}, {Role: "user", Content: r.User}},
-		Temperature: 0,
-		Seed:        7,
-		MaxTokens:   r.MaxTokens,
-	}
-	if c.cfg.Reasoning != ReasoningOmit {
-		body.ReasoningEffort = c.cfg.Reasoning
-	}
+	body := c.wire(r.System, r.User, r.MaxTokens)
 	if r.Schema != nil {
 		name := r.SchemaName
 		if name == "" {
@@ -156,6 +162,43 @@ func (c *Client) JSON(ctx context.Context, r Request, out any) (string, Usage, e
 	} else {
 		body.ResponseFormat = map[string]any{"type": "json_object"}
 	}
+	content, usage, err := c.complete(ctx, body)
+	if err != nil {
+		return content, usage, err
+	}
+	if err := decodeJSON(content, out); err != nil {
+		return content, usage, err
+	}
+	return content, usage, nil
+}
+
+// Text runs a completion and returns the model's text. Unlike JSON it does not
+// set response_format, and an empty system message is omitted, so a judge that
+// asks for "yes" or "no" can be sent as a single user message.
+func (c *Client) Text(ctx context.Context, system, user string, maxTokens int) (string, Usage, error) {
+	body := c.wire(system, user, maxTokens)
+	if system == "" {
+		body.Messages = body.Messages[1:]
+	}
+	return c.complete(ctx, body)
+}
+
+func (c *Client) wire(system, user string, maxTokens int) wireRequest {
+	msgs := []Message{{Role: "system", Content: system}, {Role: "user", Content: user}}
+	body := wireRequest{
+		Model:       c.cfg.Model,
+		Messages:    msgs,
+		Temperature: 0,
+		Seed:        7,
+		MaxTokens:   maxTokens,
+	}
+	if c.cfg.Reasoning != ReasoningOmit {
+		body.ReasoningEffort = c.cfg.Reasoning
+	}
+	return body
+}
+
+func (c *Client) complete(ctx context.Context, body wireRequest) (string, Usage, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return "", Usage{}, err
@@ -192,9 +235,6 @@ func (c *Client) JSON(ctx context.Context, r Request, out any) (string, Usage, e
 	content := wr.Choices[0].Message.Content
 	if wr.Choices[0].FinishReason == "length" {
 		return content, wr.Usage, ErrTruncated
-	}
-	if err := decodeJSON(content, out); err != nil {
-		return content, wr.Usage, err
 	}
 	return content, wr.Usage, nil
 }

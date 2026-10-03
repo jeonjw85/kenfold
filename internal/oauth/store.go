@@ -7,11 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/kenfold/kenfold/internal/authz"
 )
 
 // Lifetimes.
@@ -25,9 +28,10 @@ const (
 )
 
 var (
-	errNotFound = errors.New("not found")
-	errInvalid  = errors.New("invalid, expired, or already used")
-	errReuse    = errors.New("refresh token reuse")
+	errNotFound     = errors.New("not found")
+	errInvalid      = errors.New("invalid, expired, or already used")
+	errReuse        = errors.New("refresh token reuse")
+	errInvalidScope = errors.New("requested scopes exceed the refresh token's scopes")
 
 	// Owner password checks (the OAuth consent page and the dashboard login).
 	ErrWrongPassword = errors.New("wrong owner password")
@@ -285,7 +289,7 @@ type codeRecord struct {
 
 // useCode marks a code used and returns it. A code presented twice revokes
 // its grant (OAuth 2.1 section 4.1.2: tokens issued with it may be stolen).
-func (s *Store) useCode(ctx context.Context, code string) (codeRecord, error) {
+func (s *Store) useCode(ctx context.Context, code, clientID, redirectURI string) (codeRecord, error) {
 	var rec codeRecord
 	reused := false
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
@@ -303,6 +307,11 @@ func (s *Store) useCode(ctx context.Context, code string) (codeRecord, error) {
 		}
 		if err != nil {
 			return err
+		}
+		// A different client or redirect must not consume the code or revoke
+		// an existing grant by presenting a code that does not belong to it.
+		if rec.grant.ClientID != clientID || rec.redirectURI != redirectURI {
+			return errInvalid
 		}
 		if used != nil {
 			reused = true
@@ -367,7 +376,7 @@ type execer interface {
 // refresh rotates a refresh token. Presenting a refresh token that was
 // already rotated revokes the grant: either the client or an attacker has a
 // stolen copy, and the owner has to approve the client again.
-func (s *Store) refresh(ctx context.Context, clientID, token string) (Tokens, error) {
+func (s *Store) refresh(ctx context.Context, clientID, token, scope string) (Tokens, error) {
 	var out Tokens
 	reused := false
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
@@ -376,7 +385,7 @@ func (s *Store) refresh(ctx context.Context, clientID, token string) (Tokens, er
 		var revoked *time.Time
 		h := hashToken(token)
 		err := tx.QueryRow(ctx, `
-			SELECT t.expires_at, t.revoked_at, g.id, g.client_id, g.agent, g.scopes, g.resource, g.revoked_at
+			SELECT t.expires_at, t.revoked_at, g.id, g.client_id, g.agent, t.scopes, g.resource, g.revoked_at
 			FROM oauth_token t JOIN oauth_grant g ON g.id = t.grant_id
 			WHERE t.token_hash = $1 AND t.kind = 'refresh' FOR UPDATE OF t, g`, h).
 			Scan(&expires, &revoked, &g.ID, &g.ClientID, &g.Agent, &g.Scopes, &g.Resource, &g.RevokedAt)
@@ -397,6 +406,18 @@ func (s *Store) refresh(ctx context.Context, clientID, token string) (Tokens, er
 			}
 			_, err := tx.Exec(ctx, `UPDATE oauth_token SET revoked_at = now() WHERE grant_id = $1 AND revoked_at IS NULL`, g.ID)
 			return err
+		}
+		if scope != "" {
+			// Validate before rotation: an invalid request must leave the old
+			// refresh token usable. Bind the new pair to the requested subset,
+			// so later refreshes cannot restore scopes previously relinquished.
+			if !subset(strings.Fields(scope), g.Scopes) {
+				return errInvalidScope
+			}
+			g.Scopes = authz.Normalize(scope)
+			if len(g.Scopes) == 0 {
+				return errInvalidScope
+			}
 		}
 		if _, err := tx.Exec(ctx, `UPDATE oauth_token SET revoked_at = now() WHERE token_hash = $1`, h); err != nil {
 			return err
@@ -421,7 +442,7 @@ func (s *Store) revokeToken(ctx context.Context, clientID, token string) error {
 		var kind, grantID string
 		err := tx.QueryRow(ctx, `
 			SELECT t.kind, t.grant_id::text FROM oauth_token t JOIN oauth_grant g ON g.id = t.grant_id
-			WHERE t.token_hash = $1 AND g.client_id = $2`, hashToken(token), clientID).Scan(&kind, &grantID)
+			WHERE t.token_hash = $1 AND g.client_id = $2 FOR UPDATE OF t, g`, hashToken(token), clientID).Scan(&kind, &grantID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
@@ -429,6 +450,11 @@ func (s *Store) revokeToken(ctx context.Context, clientID, token string) error {
 			return err
 		}
 		if kind == "refresh" {
+			// Serialize with refresh rotation, and revoke the grant so token
+			// issuance racing this request cannot restore access afterward.
+			if _, err := tx.Exec(ctx, `UPDATE oauth_grant SET revoked_at = coalesce(revoked_at, now()) WHERE id = $1`, grantID); err != nil {
+				return err
+			}
 			_, err = tx.Exec(ctx, `UPDATE oauth_token SET revoked_at = now() WHERE grant_id = $1 AND revoked_at IS NULL`, grantID)
 		} else {
 			_, err = tx.Exec(ctx, `UPDATE oauth_token SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL`, hashToken(token))

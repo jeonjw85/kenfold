@@ -70,6 +70,21 @@ func New(cfg Config) (*Client, error) {
 	if hc == nil {
 		hc = &http.Client{Timeout: cfg.Timeout}
 	}
+	copied := *hc
+	checkRedirect := hc.CheckRedirect
+	copied.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) > 0 && (req.URL.Scheme != via[0].URL.Scheme || !strings.EqualFold(req.URL.Host, via[0].URL.Host)) {
+			return errors.New("refusing to redirect a model API request to a different origin")
+		}
+		if checkRedirect != nil {
+			return checkRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	hc = &copied
 	u.Path = strings.TrimSuffix(u.Path, "/") + "/rerank"
 	return &Client{endpoint: u.String(), cfg: cfg, http: hc}, nil
 }

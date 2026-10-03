@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -17,6 +18,9 @@ const (
 	ExtractDone    = "done"
 	ExtractFailed  = "failed"
 )
+
+// ErrExtractionLeaseLost means another worker reclaimed or completed the job.
+var ErrExtractionLeaseLost = errors.New("extraction claim is no longer current")
 
 // ExtractionJob is a claimed session summary.
 type ExtractionJob struct {
@@ -66,36 +70,53 @@ func (s *Store) ClaimExtraction(ctx context.Context, notBefore time.Time, lease 
 	return job, nil
 }
 
-// FinishExtraction records a successful extraction.
-func (s *Store) FinishExtraction(ctx context.Context, sourceID string, candidates, stored int) error {
+// FinishExtraction records a successful extraction for the claimed attempt.
+func (s *Store) FinishExtraction(ctx context.Context, sourceID string, attempt, candidates, stored int) error {
+	if !ValidID(sourceID) {
+		return ErrInvalidID
+	}
 	ct, err := s.pool.Exec(ctx, `
 		UPDATE extraction SET status = 'done', candidates = $2, stored = $3, locked_until = NULL, error = NULL
-		WHERE source_id = $1`, sourceID, candidates, stored)
+		WHERE source_id = $1 AND status = 'running' AND attempts = $4`, sourceID, candidates, stored, attempt)
 	if err != nil {
 		return err
 	}
 	if ct.RowsAffected() == 0 {
-		return ErrNotFound
+		return s.extractionClaimError(ctx, sourceID)
 	}
 	return nil
 }
 
-// FailExtraction records a failed attempt. retryAt is when to try again; nil
-// means give up.
-func (s *Store) FailExtraction(ctx context.Context, sourceID, msg string, retryAt *time.Time) error {
+// FailExtraction records a failure for the claimed attempt. retryAt is when
+// to try again; nil means give up.
+func (s *Store) FailExtraction(ctx context.Context, sourceID string, attempt int, msg string, retryAt *time.Time) error {
+	if !ValidID(sourceID) {
+		return ErrInvalidID
+	}
 	if len(msg) > 500 {
-		msg = msg[:500]
+		msg = strings.ToValidUTF8(msg[:500], "")
 	}
 	ct, err := s.pool.Exec(ctx, `
 		UPDATE extraction SET status = 'failed', error = $2, next_attempt_at = $3, locked_until = NULL
-		WHERE source_id = $1`, sourceID, msg, retryAt)
+		WHERE source_id = $1 AND status = 'running' AND attempts = $4`, sourceID, msg, retryAt, attempt)
 	if err != nil {
 		return err
 	}
 	if ct.RowsAffected() == 0 {
-		return ErrNotFound
+		return s.extractionClaimError(ctx, sourceID)
 	}
 	return nil
+}
+
+func (s *Store) extractionClaimError(ctx context.Context, sourceID string) error {
+	var exists bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM extraction WHERE source_id = $1)`, sourceID).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return ErrNotFound
+	}
+	return ErrExtractionLeaseLost
 }
 
 // ExtractionStats counts summaries by extraction state.
@@ -232,12 +253,21 @@ func (s *Store) ApproveReplacing(ctx context.Context, id, target string) (Memory
 // Reject soft-deletes a proposed memory on the user's behalf and records the
 // reason. Only proposed memories can be rejected (ErrNotProposed otherwise).
 func (s *Store) Reject(ctx context.Context, id, reason, agent string) (Memory, error) {
-	m, err := s.Get(ctx, id)
-	if err != nil {
-		return Memory{}, err
+	if !ValidID(id) {
+		return Memory{}, ErrInvalidID
 	}
-	if m.Status != memory.StatusProposed {
-		return Memory{}, fmt.Errorf("%w (status is %s)", ErrNotProposed, m.Status)
+	var m Memory
+	err := scan(s.pool.QueryRow(ctx, `
+		UPDATE memory SET status = 'deleted',
+		    attrs = attrs || jsonb_strip_nulls(jsonb_build_object(
+		        'forgotten_by', $3::text, 'forget_reason', NULLIF($2::text, '')))
+		WHERE id = $1 AND status = 'proposed'
+		RETURNING `+columns, id, reason, agent), &m)
+	if errors.Is(err, pgx.ErrNoRows) {
+		m, err = s.Get(ctx, id)
+		if err == nil {
+			return Memory{}, fmt.Errorf("%w (status is %s)", ErrNotProposed, m.Status)
+		}
 	}
-	return s.SoftDelete(ctx, id, reason, agent)
+	return m, err
 }

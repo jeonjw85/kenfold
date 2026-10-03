@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,12 +68,12 @@ func TestExtractionStoreIntegration(t *testing.T) {
 		t.Errorf("third claim: %v (deleted and non-episodic must not be claimed)", err)
 	}
 
-	if err := s.FinishExtraction(ctx, j1.Source.ID, 3, 2); err != nil {
+	if err := s.FinishExtraction(ctx, j1.Source.ID, j1.Attempts, 3, 2); err != nil {
 		t.Fatal(err)
 	}
 	// Failed with retry in the past: claimable again with attempts incremented.
-	past := time.Now().Add(-time.Second)
-	if err := s.FailExtraction(ctx, j2.Source.ID, "model timeout", &past); err != nil {
+	past := newer.CreatedAt.Add(-time.Second)
+	if err := s.FailExtraction(ctx, j2.Source.ID, j2.Attempts, "model timeout", &past); err != nil {
 		t.Fatal(err)
 	}
 	j3, err := s.ClaimExtraction(ctx, future, time.Minute, "m2")
@@ -80,8 +81,12 @@ func TestExtractionStoreIntegration(t *testing.T) {
 		t.Fatalf("retry claim = %v attempts %d, %v", j3.Source.Content, j3.Attempts, err)
 	}
 	// Failed without retry: never claimed again.
-	if err := s.FailExtraction(ctx, j3.Source.ID, "bad output", nil); err != nil {
+	if err := s.FailExtraction(ctx, j3.Source.ID, j3.Attempts, strings.Repeat("잘못된 출력", 100), nil); err != nil {
 		t.Fatal(err)
+	}
+	var failure string
+	if err := pool.QueryRow(ctx, `SELECT error FROM extraction WHERE source_id = $1`, j3.Source.ID).Scan(&failure); err != nil || len(failure) > 500 || failure == "" {
+		t.Errorf("truncated UTF-8 failure = %q, %v", failure, err)
 	}
 	if _, err := s.ClaimExtraction(ctx, future, time.Minute, "m"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("permanently failed claimed again: %v", err)
@@ -96,12 +101,31 @@ func TestExtractionStoreIntegration(t *testing.T) {
 	if err != nil || jc2.Source.ID != crashed.ID || jc2.Attempts != 2 {
 		t.Errorf("expired lease not reclaimed: %v %d %v", jc2.Source.Content, jc2.Attempts, err)
 	}
-	if err := s.FinishExtraction(ctx, "11111111-1111-1111-1111-111111111111", 0, 0); !errors.Is(err, ErrNotFound) {
+	if err := s.FinishExtraction(ctx, "11111111-1111-1111-1111-111111111111", 1, 0, 0); !errors.Is(err, ErrNotFound) {
 		t.Errorf("finish unknown: %v", err)
 	}
 	st, err := s.ExtractionStatus(ctx)
 	if err != nil || st.Done != 1 || st.Failed != 1 || st.Running != 1 || st.Pending != 0 || st.Stored != 2 {
 		t.Errorf("status = %+v, %v", st, err)
+	}
+	// The worker from the expired lease must not complete or fail its successor.
+	if err := s.FinishExtraction(ctx, jc.Source.ID, jc.Attempts, 99, 99); !errors.Is(err, ErrExtractionLeaseLost) {
+		t.Errorf("old attempt finished reclaimed extraction: %v", err)
+	}
+	if err := s.FailExtraction(ctx, jc.Source.ID, jc.Attempts, "old failure", nil); !errors.Is(err, ErrExtractionLeaseLost) {
+		t.Errorf("old attempt failed reclaimed extraction: %v", err)
+	}
+	if err := s.FinishExtraction(ctx, jc2.Source.ID, jc2.Attempts, 4, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FailExtraction(ctx, jc2.Source.ID, jc2.Attempts, "late failure", nil); !errors.Is(err, ErrExtractionLeaseLost) {
+		t.Errorf("completed extraction reverted to failed: %v", err)
+	}
+	var state string
+	var attempts, candidates, stored int
+	if err := pool.QueryRow(ctx, `SELECT status, attempts, candidates, stored FROM extraction WHERE source_id = $1`, jc2.Source.ID).
+		Scan(&state, &attempts, &candidates, &stored); err != nil || state != ExtractDone || attempts != 2 || candidates != 4 || stored != 1 {
+		t.Errorf("reclaimed extraction = %s, %d, %d, %d: %v", state, attempts, candidates, stored, err)
 	}
 
 	// SeenContent finds memories in any status.
@@ -165,4 +189,46 @@ func TestExtractionStoreIntegration(t *testing.T) {
 	if _, err := s.ApproveReplacing(ctx, newFact.ID, oldFact.ID); !errors.Is(err, ErrNotProposed) {
 		t.Errorf("second approve replacing: %v", err)
 	}
+
+	t.Run("reject cannot delete a concurrently approved memory", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		proposed := mk(memory.TypeProject, "project:ex/x", "Awaiting concurrent review.", memory.StatusProposed)
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(context.Background())
+		if _, err := tx.Exec(ctx, `UPDATE memory SET status = 'active', trust = 'user' WHERE id = $1`, proposed.ID); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			_, err := s.Reject(ctx, proposed.ID, "reject", "test")
+			done <- err
+		}()
+		// Wait until Reject's UPDATE is blocked on the uncommitted approval.
+		for {
+			var blocked bool
+			if err := pool.QueryRow(ctx, `SELECT EXISTS (
+				SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
+				AND wait_event_type = 'Lock' AND query LIKE '%UPDATE memory%')`).Scan(&blocked); err != nil {
+				t.Fatal(err)
+			}
+			if blocked {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-done; !errors.Is(err, ErrNotProposed) {
+			t.Errorf("reject after approval = %v, want ErrNotProposed", err)
+		}
+		got, err := s.Get(ctx, proposed.ID)
+		if err != nil || got.Status != memory.StatusActive || got.Attrs["forgotten_by"] != nil {
+			t.Errorf("approved memory was rejected: %+v, %v", got, err)
+		}
+	})
 }

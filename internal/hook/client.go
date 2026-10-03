@@ -53,6 +53,19 @@ func (c *client) connect(ctx context.Context) (*mcp.ClientSession, error) {
 		}
 		copied := *hc
 		copied.Transport = bearer{token: c.o.APIKey, base: base}
+		checkRedirect := hc.CheckRedirect
+		copied.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if len(via) > 0 && (req.URL.Scheme != via[0].URL.Scheme || !strings.EqualFold(req.URL.Host, via[0].URL.Host)) {
+				return errors.New("refusing to redirect an authenticated request to a different origin")
+			}
+			if checkRedirect != nil {
+				return checkRedirect(req, via)
+			}
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return nil
+		}
 		hc = &copied
 	}
 	tr := &mcp.StreamableClientTransport{

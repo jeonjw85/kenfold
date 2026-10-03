@@ -59,6 +59,9 @@ func loopbackHost(h string) bool {
 // Comparison is exact (OAuth 2.1), except that the port of a loopback http
 // URI may vary (RFC 8252 section 7.3: native apps bind an ephemeral port).
 func redirectMatches(registered []string, requested string) bool {
+	if validRedirectURI(requested) != nil {
+		return false
+	}
 	for _, r := range registered {
 		if r == requested {
 			return true
@@ -73,7 +76,11 @@ func redirectMatches(registered []string, requested string) bool {
 		if err != nil || reg.Scheme != "http" || !loopbackHost(reg.Hostname()) {
 			continue
 		}
-		if reg.Hostname() == req.Hostname() && reg.Path == req.Path && reg.RawQuery == req.RawQuery {
+		// The port is the only permitted variation, including for escaped
+		// paths. Comparing decoded paths would also accept different URIs.
+		candidate := *req
+		candidate.Host = reg.Host
+		if reg.Hostname() == req.Hostname() && candidate.String() == r {
 			return true
 		}
 	}

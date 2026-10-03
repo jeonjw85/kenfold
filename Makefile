@@ -20,13 +20,21 @@ KENFOLD_CLI := docker compose exec -T kenfold /usr/local/bin/kenfold
 GRAMMARS  ?= go typescript tsx javascript python rust java kotlin ruby c_sharp php c cpp swift scala bash
 GO_TAGS   := grammar_subset $(addprefix grammar_subset_,$(GRAMMARS))
 
-.PHONY: build test test-integration lint fmt up up-embed up-extract down logs migrate key keys reindex review eval eval-search clean
+.PHONY: build check test test-race test-integration vuln lint fmt up up-embed up-extract down logs migrate key keys reindex review eval eval-search bench clean
 
 build: ## Build ./bin/kenfold
 	CGO_ENABLED=0 go build -trimpath -tags "$(GO_TAGS)" -ldflags "$(LDFLAGS)" -o bin/kenfold ./cmd/kenfold
 
 test: ## Unit tests + stdio end-to-end test (no database needed)
 	go test ./...
+
+check: lint test-race build vuln ## Release checks (set KENFOLD_TEST_DATABASE_URL to include integration tests)
+
+test-race: ## Uncached tests with the race detector; packages share a throwaway integration database
+	go test -race -count=1 -p 1 ./...
+
+vuln: ## Scan reachable code against the Go vulnerability database
+	go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 
 test-integration: ## Integration tests against the compose Postgres (throwaway database, run `make up` first)
 	@docker compose exec -T postgres psql -U kenfold -d kenfold -tAc \
@@ -109,6 +117,27 @@ review: ## Review proposed memories (extracted memories, preferences) interactiv
 eval: ## Measure extraction, classification, and consolidation on the internal eval sets (needs `make up-extract`)
 	KENFOLD_EVAL_CHAT_URL=http://127.0.0.1:11435/v1 KENFOLD_EVAL_CHAT_MODEL=$(EXTRACT_MODEL) \
 	  go test -count=1 -run TestEvalModel -v -timeout 45m ./internal/extract/ ./internal/consolidate/
+
+# Public QA benchmarks. Needs the embed stack and an OpenAI-compatible chat
+# API. BENCH_EXTRACT=1 also runs the local extractor (make up-extract).
+# KENFOLD_BENCH_LIMIT=2 is a smoke run. This truncates the test database.
+BENCH_READER ?= gpt-4o-mini
+BENCH_JUDGE  ?= gpt-4o
+BENCH_EXTRACT ?= 1
+bench: ## LoCoMo + LongMemEval_S subset (needs up-embed, KENFOLD_BENCH_CHAT_URL, KENFOLD_BENCH_API_KEY)
+	@test -n "$(KENFOLD_BENCH_CHAT_URL)" || { echo "set KENFOLD_BENCH_CHAT_URL (OpenAI-compatible /v1) and KENFOLD_BENCH_API_KEY" >&2; exit 2; }
+	@docker compose exec -T postgres psql -U kenfold -d kenfold -tAc \
+	  "SELECT 1 FROM pg_database WHERE datname = '$(TEST_DB)'" | grep -q 1 || \
+	  docker compose exec -T postgres psql -U kenfold -d kenfold -c "CREATE DATABASE $(TEST_DB)"
+	KENFOLD_TEST_DATABASE_URL="$(TEST_DB_URL)" \
+	KENFOLD_EVAL_EMBED_URL=http://127.0.0.1:11435/v1 KENFOLD_EVAL_EMBED_MODEL=kenfold-embed \
+	KENFOLD_BENCH_CHAT_URL="$(KENFOLD_BENCH_CHAT_URL)" KENFOLD_BENCH_API_KEY="$(KENFOLD_BENCH_API_KEY)" \
+	KENFOLD_BENCH_READER="$(BENCH_READER)" KENFOLD_BENCH_JUDGE="$(BENCH_JUDGE)" \
+	KENFOLD_BENCH_REASONING="$(KENFOLD_BENCH_REASONING)" \
+	KENFOLD_BENCH_LIMIT="$(KENFOLD_BENCH_LIMIT)" KENFOLD_BENCH_LME_N="$(KENFOLD_BENCH_LME_N)" \
+	$(if $(filter 1,$(BENCH_EXTRACT)),KENFOLD_BENCH_EXTRACT=1 KENFOLD_EVAL_CHAT_URL=http://127.0.0.1:11435/v1 KENFOLD_EVAL_CHAT_MODEL=$(EXTRACT_MODEL)) \
+	$(if $(filter 1,$(RERANK)),KENFOLD_EVAL_RERANK_URL=http://127.0.0.1:11436/v1) \
+	go test -count=1 -run TestBench -v -timeout 8h ./internal/bench/
 
 eval-search: ## Measure retrieval (recall@5 per pipeline stage) on the internal corpus (needs `make up-embed`)
 	@docker compose exec -T postgres psql -U kenfold -d kenfold -tAc \

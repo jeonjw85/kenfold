@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -120,7 +121,7 @@ func (c *cli) importArchive(ctx context.Context, args []string) error {
 		return store.ErrArchiveFormat
 	}
 	var h store.ArchiveHeader
-	if err := json.Unmarshal(sc.Bytes(), &h); err != nil || h.Format != store.ArchiveFormat {
+	if err := decodeArchiveLine(sc.Text(), &h); err != nil || h.Format != store.ArchiveFormat {
 		return fmt.Errorf("%w (expected %s)", store.ErrArchiveFormat, store.ArchiveFormat)
 	}
 	// Read and validate everything before writing anything.
@@ -129,9 +130,7 @@ func (c *cli) importArchive(ctx context.Context, args []string) error {
 	for sc.Scan() {
 		line++
 		var rec store.ArchiveRecord
-		dec := json.NewDecoder(strings.NewReader(sc.Text()))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&rec); err != nil {
+		if err := decodeArchiveLine(sc.Text(), &rec); err != nil {
 			return fmt.Errorf("line %d: %w", line, err)
 		}
 		if err := validRecord(rec); err != nil {
@@ -198,6 +197,32 @@ func (c *cli) importArchive(ctx context.Context, args []string) error {
 	return nil
 }
 
+func decodeArchiveLine(line string, out any) error {
+	dec := json.NewDecoder(strings.NewReader(line))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(out); err != nil {
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		return errors.New("each archive line must contain exactly one JSON value")
+	}
+	return nil
+}
+
+func validArchiveScope(scope string) bool {
+	if scope == memory.ScopeUser {
+		return true
+	}
+	for _, prefix := range []string{"project:", "repo:"} {
+		if project, ok := strings.CutPrefix(scope, prefix); ok && project != "" {
+			normalized, err := memory.Scope(project)
+			return err == nil && normalized == "project:"+project
+		}
+	}
+	return false
+}
+
 // validRecord checks a record against the invariants the database enforces,
 // so a bad archive fails with a line number instead of a constraint name,
 // and rejects content with credentials, like remember does.
@@ -220,8 +245,27 @@ func validRecord(r store.ArchiveRecord) error {
 		if !m.Type.Valid() {
 			return fmt.Errorf("memory %s: unknown type %q", m.ID, m.Type)
 		}
-		if _, err := memory.Scope(strings.TrimPrefix(strings.TrimPrefix(m.Scope, "project:"), "repo:")); err != nil && m.Scope != memory.ScopeUser {
+		if !validArchiveScope(m.Scope) {
 			return fmt.Errorf("memory %s: invalid scope %q", m.ID, m.Scope)
+		}
+		switch m.Trust {
+		case memory.TrustUser, memory.TrustAgent, memory.TrustExternal:
+		default:
+			return fmt.Errorf("memory %s: invalid trust %q", m.ID, m.Trust)
+		}
+		switch m.Status {
+		case memory.StatusProposed, memory.StatusActive, memory.StatusSuperseded, memory.StatusDeleted:
+		default:
+			return fmt.Errorf("memory %s: invalid status %q", m.ID, m.Status)
+		}
+		if math.IsNaN(m.Confidence) || m.Confidence < 0 || m.Confidence > 1 {
+			return fmt.Errorf("memory %s: confidence must be between 0 and 1", m.ID)
+		}
+		if m.Supersedes != nil && (!store.ValidID(*m.Supersedes) || strings.EqualFold(*m.Supersedes, m.ID)) {
+			return fmt.Errorf("memory %s: invalid supersedes id", m.ID)
+		}
+		if m.ValidFrom != nil && m.ValidTo != nil && m.ValidTo.Before(*m.ValidFrom) {
+			return fmt.Errorf("memory %s: valid_to is before valid_from", m.ID)
 		}
 		if strings.TrimSpace(m.Content) == "" {
 			return fmt.Errorf("memory %s: empty content", m.ID)
@@ -236,12 +280,26 @@ func validRecord(r store.ArchiveRecord) error {
 			return fmt.Errorf("memory %s: invalid source_agent %q", m.ID, m.SourceAgent)
 		}
 	case r.Edge != nil:
-		if !store.ValidID(r.Edge.Src) || !store.ValidID(r.Edge.Dst) || r.Edge.Relation == "" || r.Edge.Src == r.Edge.Dst {
+		if !store.ValidID(r.Edge.Src) || !store.ValidID(r.Edge.Dst) || r.Edge.Relation == "" || strings.EqualFold(r.Edge.Src, r.Edge.Dst) {
 			return errors.New("invalid edge")
+		}
+		if !memory.ValidAgent(r.Edge.SourceAgent) || math.IsNaN(r.Edge.Weight) || math.IsInf(r.Edge.Weight, 0) {
+			return errors.New("invalid edge provenance or weight")
 		}
 	case r.Ref != nil:
 		if !store.ValidID(r.Ref.MemoryID) || (r.Ref.Path == "" && r.Ref.Symbol == "") {
 			return errors.New("invalid code reference")
+		}
+		if !validArchiveScope(r.Ref.Scope) || r.Ref.Scope == memory.ScopeUser {
+			return errors.New("code references need a project or repo scope")
+		}
+		switch r.Ref.State {
+		case "pending", "current", "changed", "missing", "unresolved":
+		default:
+			return errors.New("invalid code reference state")
+		}
+		if (r.Ref.AnchorHash == nil) != (r.Ref.AnchorCommit == nil) {
+			return errors.New("code reference anchor hash and commit must be set together")
 		}
 	case r.End != nil:
 		if r.End.Memories < 0 || r.End.Edges < 0 || r.End.Refs < 0 {

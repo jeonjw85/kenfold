@@ -172,6 +172,16 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 			APIKey: getenv("KENFOLD_RERANK_API_KEY"),
 		},
 	}
+	// Compose passes the password separately so URL punctuation in a strong
+	// password cannot change the database host, path, or query parameters.
+	if password := getenv("KENFOLD_DATABASE_PASSWORD"); password != "" {
+		u, err := url.Parse(c.DatabaseURL)
+		if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") || u.Host == "" || u.User == nil {
+			return Config{}, fmt.Errorf("KENFOLD_DATABASE_PASSWORD needs a postgres URL with a username in KENFOLD_DATABASE_URL")
+		}
+		u.User = url.UserPassword(u.User.Username(), password)
+		c.DatabaseURL = u.String()
+	}
 
 	if v := getenv("KENFOLD_ALLOWED_HOSTS"); v != "" {
 		c.AllowedHosts = nil

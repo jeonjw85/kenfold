@@ -7,6 +7,7 @@ package restapi
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -103,6 +104,10 @@ func (a *api) checkRefs(w http.ResponseWriter, r *http.Request) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&rep); err != nil {
 		writeError(w, http.StatusBadRequest, "body must be a JSON check report")
+		return
+	}
+	if err := dec.Decode(new(any)); err != io.EOF {
+		writeError(w, http.StatusBadRequest, "body must contain exactly one JSON check report")
 		return
 	}
 	scope, err := projectScope(rep.Project)
