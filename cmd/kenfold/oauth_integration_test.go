@@ -359,10 +359,10 @@ func TestOAuthIntegration(t *testing.T) {
 		if st, m := tokenReq(bad("code_verifier", strings.Repeat("w", 64))); st != 400 || m["error"] != "invalid_grant" {
 			t.Errorf("wrong verifier: %d %v", st, m)
 		}
-		// A failed PKCE check still consumed the code: it cannot be retried (single use).
+		// A failed PKCE check must leave the code usable by its legitimate owner.
 		st, m := tokenReq(bad("code_verifier", verifier))
-		if st != 400 || m["error"] != "invalid_grant" {
-			t.Errorf("code reuse after a failed attempt: %d %v", st, m)
+		if st != 200 || m["token_type"] != "Bearer" {
+			t.Errorf("valid retry after a failed PKCE attempt: status=%d error=%v", st, m["error"])
 		}
 
 		// A clean run: exchange, then refresh rotation and reuse detection.

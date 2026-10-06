@@ -111,6 +111,8 @@ MCP tools only run when the model decides to call them. Hooks make memory automa
 
 Sessions outside a git repository are not recorded. The hook never blocks the agent: problems are reported as a warning.
 
+Queued summaries are bound to the original server URL, client name, and configured credential. A different agent or server cannot send them. Older, unbound queue files are kept with a warning rather than guessing their owner; queued files expire after 30 days.
+
 Set it up per agent. Store the agent's key in a file, then print the hooks configuration:
 
 ```sh

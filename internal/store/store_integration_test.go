@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"math"
 	"os"
@@ -54,6 +56,19 @@ func (d downEmbedder) Embed(context.Context, []string) ([][]float32, error) {
 	return nil, errors.New("connection refused")
 }
 
+type rewritingEmbedder struct {
+	store       *Store
+	id, content string
+}
+
+func (e rewritingEmbedder) Model() string { return "rewrite-test" }
+func (e rewritingEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	if _, err := e.store.Rewrite(ctx, e.id, e.content, nil, "redact during embedding"); err != nil {
+		return nil, err
+	}
+	return fakeEmbedder{model: e.Model()}.Embed(ctx, texts)
+}
+
 func bagOfWords(text string) []float32 {
 	v := make([]float32, EmbeddingDim)
 	for _, w := range strings.FieldsFunc(strings.ToLower(text), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
@@ -99,6 +114,35 @@ func TestStoreIntegration(t *testing.T) {
 	}
 
 	s := New(pool)
+	t.Run("long memory content and normalized lookups", func(t *testing.T) {
+		for _, suffix := range []string{"", "한글"} {
+			var b strings.Builder
+			for i := range 110 {
+				fmt.Fprintf(&b, "%x%s ", sha256.Sum256([]byte(fmt.Sprint(i))), suffix)
+			}
+			text := strings.TrimSpace(b.String())
+			m, err := s.Create(ctx, CreateParams{Type: memory.TypeProject, Scope: "project:ex/long", Content: text,
+				SourceAgent: "test", Trust: memory.TrustAgent, Status: memory.StatusActive})
+			if err != nil {
+				t.Fatalf("valid content under 8000 characters rejected: %v", err)
+			}
+			t.Cleanup(func() {
+				if _, err := pool.Exec(ctx, `DELETE FROM memory WHERE id = $1`, m.ID); err != nil {
+					t.Error(err)
+				}
+			})
+			variant := strings.ToUpper(strings.ReplaceAll(text, " ", "  ")) + "."
+			if got, err := s.FindDuplicate(ctx, m.Scope, m.Type, variant); err != nil || got.ID != m.ID || got.Content != text {
+				t.Errorf("long normalized duplicate mismatch: id=%s err=%v", got.ID, err)
+			}
+			if got, err := s.SeenContent(ctx, m.Scope, variant); err != nil || got.ID != m.ID {
+				t.Errorf("long SeenContent mismatch: id=%s err=%v", got.ID, err)
+			}
+			if _, err := s.FindDuplicate(ctx, m.Scope, m.Type, text+" changed"); !errors.Is(err, ErrNotFound) {
+				t.Errorf("different long content treated as duplicate: %v", err)
+			}
+		}
+	})
 	const agent = "store-test"
 	create := func(t *testing.T, p CreateParams) Memory {
 		t.Helper()
@@ -583,6 +627,31 @@ func TestStoreIntegration(t *testing.T) {
 			if _, err := s.FindSessionMemory(ctx, scope, memory.TypeEpisodic, c.agent, c.session); !errors.Is(err, ErrNotFound) {
 				t.Errorf("%s/%s matched: %v", c.agent, c.session, err)
 			}
+		}
+	})
+
+	t.Run("backfill cannot restore a pre-redaction vector", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `TRUNCATE memory CASCADE`); err != nil {
+			t.Fatal(err)
+		}
+		m := create(t, CreateParams{Type: memory.TypeSemantic, Scope: "user", Content: "obsolete unredacted material"})
+		const clean = "sanitized replacement text"
+		e := rewritingEmbedder{store: s, id: m.ID, content: clean}
+		stats, err := s.Backfill(ctx, e, 1)
+		if err != nil || stats.Embedded != 0 || stats.Skipped != 1 {
+			t.Errorf("stale embedding reported as written: stats=%+v err=%v", stats, err)
+		}
+		var cleared bool
+		if err := pool.QueryRow(ctx, `SELECT embedding IS NULL AND embedding_model IS NULL FROM memory WHERE id = $1`, m.ID).Scan(&cleared); err != nil || !cleared {
+			t.Errorf("backfill restored the old vector after redaction: cleared=%v err=%v", cleared, err)
+		}
+		stats, err = s.Backfill(ctx, fakeEmbedder{model: e.Model()}, 1)
+		if err != nil || stats.Embedded != 1 {
+			t.Errorf("sanitized content not embedded on the next run: stats=%+v err=%v", stats, err)
+		}
+		results, err := s.Search(ctx, SearchParams{Query: "unmatched", Vector: bagOfWords(clean), Model: e.Model()})
+		if err != nil || len(results) != 1 || results[0].ID != m.ID || results[0].Content != clean {
+			t.Errorf("sanitized vector not searchable: rows=%d err=%v", len(results), err)
 		}
 	})
 

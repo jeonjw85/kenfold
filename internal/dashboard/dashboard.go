@@ -344,7 +344,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
-	err := s.d.Owner.CheckOwner(r.Context(), r.PostForm.Get("password"))
+	stamp, err := s.d.Owner.CheckOwnerStamp(r.Context(), r.PostForm.Get("password"))
 	switch {
 	case errors.Is(err, oauth.ErrNoPassword):
 		s.renderLogin(w, r, "No owner password is set. On the server, run: kenfold password", http.StatusForbidden)
@@ -358,11 +358,6 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		s.renderLogin(w, r, "Wrong password.", http.StatusUnauthorized)
 		return
 	case err != nil:
-		s.serverError(w, r, err)
-		return
-	}
-	stamp, err := s.d.Owner.OwnerStamp(r.Context())
-	if err != nil {
 		s.serverError(w, r, err)
 		return
 	}

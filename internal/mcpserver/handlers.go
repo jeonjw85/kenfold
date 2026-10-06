@@ -207,7 +207,15 @@ func (h *handlers) remember(ctx context.Context, req *mcp.CallToolRequest, in Re
 		p.Refs = append(p.Refs, store.RefTarget(r))
 	}
 
-	m, err := h.store.Create(ctx, p)
+	var m store.Memory
+	var deduplicated bool
+	if in.Supersedes != "" {
+		m, err = h.store.Create(ctx, p)
+	} else {
+		// Inferred session replacements still need the final duplicate recheck:
+		// an identical concurrent update may already have retired their target.
+		m, deduplicated, err = h.store.CreateIfAbsent(ctx, p, in.Type)
+	}
 	switch {
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrNotActive):
 		// The superseded memory changed between the check above and the insert.
@@ -215,7 +223,10 @@ func (h *handlers) remember(ctx context.Context, req *mcp.CallToolRequest, in Re
 	case err != nil:
 		return nil, RememberOutput{}, h.internal(ctx, "remember", err)
 	}
-	out := RememberOutput{ID: m.ID, Type: m.Type, Status: m.Status}
+	out := RememberOutput{ID: m.ID, Type: m.Type, Status: m.Status, Deduplicated: deduplicated}
+	if deduplicated {
+		return nil, out, nil
+	}
 	out.Similar = h.similar(ctx, m, p.Embedding, p.EmbeddingModel)
 	return nil, out, nil
 }

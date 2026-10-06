@@ -19,6 +19,7 @@ package hook
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -107,6 +108,18 @@ func (o *Options) defaults() {
 	}
 }
 
+// destination binds a queued write without persisting the bearer token. Include
+// the client name even with a configured token: an AUTH=none server ignores the
+// token and attributes writes by client name.
+func (o Options) destination() string {
+	identity, mode := o.APIKey, "bearer"
+	if identity == "" {
+		identity, mode = o.ClientName, "client"
+	}
+	b, _ := json.Marshal([4]string{o.URL, mode, identity, o.ClientName})
+	return fmt.Sprintf("%x", sha256.Sum256(b))
+}
+
 // Run handles one hook invocation. It returns an error only for problems the
 // caller should report; the session is never blocked either way.
 func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, o Options) error {
@@ -132,11 +145,11 @@ func Run(ctx context.Context, stdin io.Reader, stdout io.Writer, o Options) erro
 	case "SessionStart":
 		return r.sessionStart(ctx, stdout)
 	case "UserPromptSubmit":
-		return r.capture(kindPrompt, in.Prompt)
+		return r.capture(ctx, kindPrompt, in.Prompt)
 	case "Stop":
-		return r.capture(kindResponse, in.LastAssistantMessage)
+		return r.capture(ctx, kindResponse, in.LastAssistantMessage)
 	case "PostCompact":
-		return r.capture(kindCompact, in.CompactSummary)
+		return r.capture(ctx, kindCompact, in.CompactSummary)
 	case "SessionEnd":
 		return r.sessionEnd(ctx)
 	case "":
@@ -172,7 +185,7 @@ type specific struct {
 func (r *runner) sessionStart(ctx context.Context, stdout io.Writer) error {
 	project, branch := detectProject(ctx, r.in.Cwd)
 	if r.o.Capture && r.in.SessionID != "" && project != "" {
-		if err := r.st.append(r.in.SessionID, event{Time: r.o.Now(), Kind: kindStart, Project: project, Branch: branch}); err != nil {
+		if err := r.record(event{Time: r.o.Now(), Kind: kindStart, Project: project, Branch: branch}); err != nil {
 			r.warn("record session start: %v", err)
 		}
 	}
@@ -231,12 +244,39 @@ func (r *runner) syncRefs(ctx context.Context, project string) {
 
 // ---- capture ----
 
-func (r *runner) capture(kind, text string) error {
+func (r *runner) capture(ctx context.Context, kind, text string) error {
 	if !r.o.Capture || r.in.SessionID == "" || strings.TrimSpace(text) == "" {
 		return nil
 	}
+	project, _ := detectProject(ctx, r.in.Cwd)
+	if project == "" {
+		return nil
+	}
 	clean, _ := secrets.Redact(strings.TrimSpace(text))
-	return r.st.append(r.in.SessionID, event{Time: r.o.Now(), Kind: kind, Text: truncate(clean, maxStoredRunes)})
+	return r.record(event{Time: r.o.Now(), Kind: kind, Project: project, Text: truncate(clean, maxStoredRunes)})
+}
+
+// The first project-tagged event binds a session even without SessionStart.
+// Moving to another repository must not add its text to that project's log.
+func (r *runner) record(e event) error {
+	events, err := r.st.read(r.in.SessionID)
+	if err != nil {
+		return err
+	}
+	if project := sessionProject(events); project != "" && project != e.Project {
+		r.warn("skip capture from a different project than this session")
+		return nil
+	}
+	return r.st.append(r.in.SessionID, e)
+}
+
+func sessionProject(events []event) string {
+	for _, e := range events {
+		if e.Project != "" {
+			return e.Project
+		}
+	}
+	return ""
 }
 
 // ---- SessionEnd ----
@@ -249,23 +289,27 @@ func (r *runner) sessionEnd(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read session log: %w", err)
 	}
-	project := ""
+	project := sessionProject(events)
+	if project == "" {
+		return nil // never guess the provenance of an unbound legacy log from cwd
+	}
+	// Also filter at delivery, protecting old mixed-project logs or simultaneous
+	// first captures. Legacy untagged events inherit only a preceding binding.
+	var bound []event
+	current := ""
 	for _, e := range events {
-		if e.Kind == kindStart && e.Project != "" {
-			project = e.Project
+		if e.Project != "" {
+			current = e.Project
+		}
+		if current == project {
+			bound = append(bound, e)
 		}
 	}
-	if project == "" {
-		project, _ = detectProject(ctx, r.in.Cwd)
-	}
-	if project == "" {
-		return nil // outside a repository: session summaries would pollute user-wide memory
-	}
-	summary := buildSummary(events, r.o.Now())
+	summary := buildSummary(bound, r.o.Now())
 	if summary == "" {
 		return nil // nothing was asked in this session
 	}
-	p := pending{Project: project, Content: summary, Type: "episodic", SessionID: r.in.SessionID, CreatedAt: r.o.Now()}
+	p := pending{Project: project, Content: summary, Type: "episodic", SessionID: r.in.SessionID, CreatedAt: r.o.Now(), Destination: r.o.destination()}
 	// Spool first: if the send below is cut short by the client's hook
 	// timeout, the summary is delivered at the next SessionStart. The server
 	// deduplicates, so a summary that did arrive is not stored twice.
@@ -294,8 +338,9 @@ func (r *runner) send(ctx context.Context, p pending) error {
 // the server looks unreachable.
 func (r *runner) flush(ctx context.Context) {
 	files := r.st.spooled()
-	for i, f := range files {
-		if i == maxFlushPerRun || ctx.Err() != nil {
+	sent := 0
+	for _, f := range files {
+		if sent == maxFlushPerRun || ctx.Err() != nil {
 			return
 		}
 		p, err := r.st.load(f)
@@ -304,6 +349,14 @@ func (r *runner) flush(ctx context.Context) {
 			r.st.unspool(f)
 			continue
 		}
+		if p.Destination == "" {
+			r.warn("keep unbound legacy summary %s: its original endpoint and identity are unknown", filepath.Base(f))
+			continue
+		}
+		if p.Destination != r.o.destination() {
+			continue
+		}
+		sent++
 		if err := r.send(ctx, p); err != nil {
 			if transient(err) {
 				return

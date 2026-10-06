@@ -79,16 +79,24 @@ func (s *Store) OwnerPasswordSet(ctx context.Context) (bool, error) {
 // the check refuses (errLocked) for lockoutPeriod, even for the right
 // password. The row is locked so concurrent attempts are counted.
 func (s *Store) CheckOwner(ctx context.Context, password string) error {
+	_, err := s.CheckOwnerStamp(ctx, password)
+	return err
+}
+
+// CheckOwnerStamp verifies the password with the same lockout as CheckOwner
+// and returns the stamp of the exact hash verified, not a later password.
+func (s *Store) CheckOwnerStamp(ctx context.Context, password string) (string, error) {
 	select {
 	case ownerChecks <- struct{}{}:
 		defer func() { <-ownerChecks }()
 	case <-ctx.Done():
-		return ctx.Err()
+		return "", ctx.Err()
 	}
 	// The failure count must be committed, so a wrong password is reported
 	// after the transaction, not by returning an error from it (which would
 	// roll the count back).
 	wrong := false
+	stamp := ""
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		var hash string
 		var failed int
@@ -110,6 +118,7 @@ func (s *Store) CheckOwner(ctx context.Context, password string) error {
 			return err
 		}
 		if ok {
+			stamp = ownerStamp(hash)
 			_, err = tx.Exec(ctx, `UPDATE oauth_owner SET failed_attempts = 0, locked_until = NULL WHERE id = 1`)
 			return err
 		}
@@ -124,9 +133,12 @@ func (s *Store) CheckOwner(ctx context.Context, password string) error {
 		return err
 	})
 	if err == nil && wrong {
-		return ErrWrongPassword
+		return "", ErrWrongPassword
 	}
-	return err
+	if err != nil {
+		return "", err
+	}
+	return stamp, nil
 }
 
 // OwnerStamp identifies the current owner password (a digest of its hash),
@@ -140,8 +152,12 @@ func (s *Store) OwnerStamp(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256([]byte(h))
-	return hex.EncodeToString(sum[:8]), nil
+	return ownerStamp(h), nil
+}
+
+func ownerStamp(hash string) string {
+	sum := sha256.Sum256([]byte(hash))
+	return hex.EncodeToString(sum[:8])
 }
 
 // ---- clients ----
@@ -287,10 +303,12 @@ type codeRecord struct {
 	challenge   string
 }
 
-// useCode marks a code used and returns it. A code presented twice revokes
-// its grant (OAuth 2.1 section 4.1.2: tokens issued with it may be stolen).
-func (s *Store) useCode(ctx context.Context, code, clientID, redirectURI string) (codeRecord, error) {
+// exchangeCode validates PKCE, consumes the code, and issues both tokens in one
+// transaction. An authenticated replay revokes its grant (OAuth 2.1 section
+// 4.1.2: tokens issued with it may be stolen).
+func (s *Store) exchangeCode(ctx context.Context, code, clientID, redirectURI, verifier string) (Tokens, error) {
 	var rec codeRecord
+	var out Tokens
 	reused := false
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		var used *time.Time
@@ -299,7 +317,7 @@ func (s *Store) useCode(ctx context.Context, code, clientID, redirectURI string)
 			SELECT c.redirect_uri, c.code_challenge, c.expires_at, c.used_at,
 			       g.id, g.client_id, g.agent, g.scopes, g.resource, g.revoked_at
 			FROM oauth_code c JOIN oauth_grant g ON g.id = c.grant_id
-			WHERE c.code_hash = $1 FOR UPDATE OF c`, hashToken(code)).
+			WHERE c.code_hash = $1 FOR UPDATE OF c, g`, hashToken(code)).
 			Scan(&rec.redirectURI, &rec.challenge, &expires, &used,
 				&rec.grant.ID, &rec.grant.ClientID, &rec.grant.Agent, &rec.grant.Scopes, &rec.grant.Resource, &rec.grant.RevokedAt)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -310,7 +328,7 @@ func (s *Store) useCode(ctx context.Context, code, clientID, redirectURI string)
 		}
 		// A different client or redirect must not consume the code or revoke
 		// an existing grant by presenting a code that does not belong to it.
-		if rec.grant.ClientID != clientID || rec.redirectURI != redirectURI {
+		if rec.grant.ClientID != clientID || rec.redirectURI != redirectURI || !pkceMatches(verifier, rec.challenge) {
 			return errInvalid
 		}
 		if used != nil {
@@ -325,15 +343,19 @@ func (s *Store) useCode(ctx context.Context, code, clientID, redirectURI string)
 			return errInvalid
 		}
 		_, err = tx.Exec(ctx, `UPDATE oauth_code SET used_at = now() WHERE code_hash = $1`, hashToken(code))
+		if err != nil {
+			return err
+		}
+		out, err = s.issue(ctx, tx, rec.grant, nil)
 		return err
 	})
 	if err != nil {
-		return codeRecord{}, err
+		return Tokens{}, err
 	}
 	if reused {
-		return codeRecord{}, errReuse
+		return Tokens{}, errReuse
 	}
-	return rec, nil
+	return out, nil
 }
 
 // ---- tokens ----

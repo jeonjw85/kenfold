@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -129,5 +130,63 @@ func TestReviewIntegration(t *testing.T) {
 	// Without a chat model, extract run explains what to set.
 	if _, _, err := runCLI(t, map[string]string{"KENFOLD_DATABASE_URL": url}, "extract", "run"); err == nil || !strings.Contains(err.Error(), "KENFOLD_CHAT_URL") {
 		t.Errorf("extract run without chat: %v", err)
+	}
+}
+
+func TestReviewLimitSelectsGloballyOldestProposalIntegration(t *testing.T) {
+	dbURL := os.Getenv("KENFOLD_TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("KENFOLD_TEST_DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	if _, err := migrations.Up(ctx, dbURL); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, `TRUNCATE memory CASCADE`); err != nil {
+		t.Fatal(err)
+	}
+	st := store.New(pool)
+	var ids []string
+	for i, scope := range []string{"user", "project:ex/review", "project:ex/review"} {
+		m, err := st.Create(ctx, store.CreateParams{Type: memory.TypePreference, Scope: scope, Content: "A proposed preference.",
+			SourceAgent: "test", Trust: memory.TrustAgent, Status: memory.StatusProposed})
+		if err != nil {
+			t.Fatal(err)
+		}
+		created := time.Date(2026, 1, i+1, 0, 0, 0, 0, time.UTC)
+		if _, err := pool.Exec(ctx, `UPDATE memory SET created_at = $2 WHERE id = $1`, m.ID, created); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, m.ID)
+	}
+	for _, tc := range []struct {
+		name, scope, want string
+	}{
+		{"all scopes", "", ids[0]},
+		{"project scope", "project:ex/review", ids[1]},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := []string{"memory", "review", "--limit", "1"}
+			if tc.scope != "" {
+				args = append(args, "--scope", tc.scope)
+			}
+			var out, errOut bytes.Buffer
+			if err := run(ctx, args, func(k string) string {
+				if k == "KENFOLD_DATABASE_URL" {
+					return dbURL
+				}
+				return ""
+			}, strings.NewReader("s\n"), &out, &errOut); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(out.String(), tc.want) || strings.Contains(out.String(), ids[2]) {
+				t.Errorf("limited review selected the newest proposal instead of oldest: %s", out.String())
+			}
+		})
 	}
 }

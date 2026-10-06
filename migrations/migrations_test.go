@@ -2,8 +2,10 @@ package migrations
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -235,6 +237,40 @@ func TestMigrationsIntegration(t *testing.T) {
 			t.Errorf("accepted %s", name)
 		}
 	}
+
+	t.Run("dedupe index upgrade and downgrade", func(t *testing.T) {
+		if _, err := p.DownTo(ctx, 7); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := p.Up(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var b strings.Builder
+		for i := range 110 {
+			fmt.Fprintf(&b, "%x ", sha256.Sum256([]byte(fmt.Sprint(i))))
+		}
+		insert := `INSERT INTO memory (type, scope, content, source_agent) VALUES ('semantic', 'user', $1, 't') RETURNING id`
+		var longID string
+		if err := db.QueryRowContext(ctx, insert, b.String()).Scan(&longID); err != nil {
+			t.Fatalf("upgraded dedupe index rejected valid long text: %v", err)
+		}
+		if err := exec(`DELETE FROM memory WHERE id = $1`, longID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := p.DownTo(ctx, 7); err != nil {
+			t.Fatalf("downgrade: %v", err)
+		}
+		if err := db.QueryRowContext(ctx, insert, b.String()).Scan(&longID); err == nil {
+			t.Fatal("downgrade did not restore original index behavior")
+		}
+		if _, err := p.Up(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var content string
+		if err := db.QueryRowContext(ctx, `SELECT content FROM memory WHERE id = $1`, id).Scan(&content); err != nil || content != "Use pgx v5 with sqlc" {
+			t.Errorf("migration changed existing content: %q err=%v", content, err)
+		}
+	})
 
 	// Down must fully revert.
 	if _, err := p.DownTo(ctx, 0); err != nil {

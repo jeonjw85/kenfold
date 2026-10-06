@@ -124,7 +124,7 @@ func (c *cli) review(ctx context.Context, args []string, in io.Reader) error {
 	if *limit < 1 || *limit > 500 {
 		return usageErr("--limit must be between 1 and 500")
 	}
-	p := store.ListParams{Statuses: []memory.Status{memory.StatusProposed}, Limit: *limit}
+	p := store.ListParams{Statuses: []memory.Status{memory.StatusProposed}, Limit: *limit, OldestFirst: true}
 	if v := strings.TrimSpace(*scope); v != "" {
 		s, err := scopeArg(v)
 		if err != nil {
@@ -145,11 +145,6 @@ func (c *cli) review(ctx context.Context, args []string, in io.Reader) error {
 		fmt.Fprintln(c.out, "Nothing to review.")
 		return nil
 	}
-	// Oldest first: review in the order memories were proposed.
-	for i, j := 0, len(ms)-1; i < j; i, j = i+1, j-1 {
-		ms[i], ms[j] = ms[j], ms[i]
-	}
-
 	sc := bufio.NewScanner(in)
 	var approved, rejected, skipped int
 	for i, m := range ms {

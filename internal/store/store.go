@@ -102,17 +102,30 @@ type CreateParams struct {
 // contradiction is never served alongside its replacement. If the new memory is
 // proposed, the old one stays active until Approve.
 func (s *Store) Create(ctx context.Context, p CreateParams) (Memory, error) {
+	m, _, err := s.create(ctx, p, nil)
+	return m, err
+}
+
+// CreateIfAbsent serializes the duplicate check and insert for remember.
+// duplicateType is the caller's requested type (empty means any type). Callers
+// use Create for explicit replacements so retiring their target is never skipped.
+// The returned bool reports that an existing memory was returned.
+func (s *Store) CreateIfAbsent(ctx context.Context, p CreateParams, duplicateType memory.Type) (Memory, bool, error) {
+	return s.create(ctx, p, &duplicateType)
+}
+
+func (s *Store) create(ctx context.Context, p CreateParams, duplicateType *memory.Type) (Memory, bool, error) {
 	if p.Supersedes != nil && !ValidID(*p.Supersedes) {
-		return Memory{}, ErrInvalidID
+		return Memory{}, false, ErrInvalidID
 	}
 	vec, err := vectorParam(p.Embedding)
 	if err != nil {
-		return Memory{}, err
+		return Memory{}, false, err
 	}
 	var model *string
 	if vec != nil {
 		if p.EmbeddingModel == "" {
-			return Memory{}, errors.New("embedding given without a model name")
+			return Memory{}, false, errors.New("embedding given without a model name")
 		}
 		model = &p.EmbeddingModel
 	}
@@ -122,7 +135,25 @@ func (s *Store) Create(ctx context.Context, p CreateParams) (Memory, error) {
 	}
 
 	var m Memory
+	deduplicated := false
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if duplicateType != nil {
+			// Use the database's exact content_key normalization. Omit type from
+			// the lock key so inferred-type and explicit-type requests coordinate.
+			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended(
+				'kenfold.remember:' || jsonb_build_array($1::text,
+				lower(regexp_replace(regexp_replace(btrim($2::text), '\s+', ' ', 'g'), '[.!。]+$', '')))::text, 0))`, p.Scope, p.Content); err != nil {
+				return err
+			}
+			dup, err := findDuplicate(ctx, tx, p.Scope, *duplicateType, p.Content)
+			if err == nil {
+				m, deduplicated = dup, true
+				return nil
+			}
+			if !errors.Is(err, ErrNotFound) {
+				return err
+			}
+		}
 		if p.Supersedes != nil {
 			if err := lockActive(ctx, tx, *p.Supersedes); err != nil {
 				return err
@@ -146,9 +177,9 @@ func (s *Store) Create(ctx context.Context, p CreateParams) (Memory, error) {
 		return addRefs(ctx, tx, m.ID, m.Scope, p.Refs)
 	})
 	if err != nil {
-		return Memory{}, err
+		return Memory{}, false, err
 	}
-	return m, nil
+	return m, deduplicated, nil
 }
 
 // lockActive row-locks id and fails unless it exists and is active.
@@ -183,10 +214,17 @@ func ContentKey(content string) string {
 // migrations), or ErrNotFound. It lets remember be idempotent when agents
 // store the same fact again.
 func (s *Store) FindDuplicate(ctx context.Context, scope string, typ memory.Type, content string) (Memory, error) {
+	return findDuplicate(ctx, s.pool, scope, typ, content)
+}
+
+func findDuplicate(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, scope string, typ memory.Type, content string) (Memory, error) {
 	var m Memory
-	err := scan(s.pool.QueryRow(ctx, `
+	err := scan(q.QueryRow(ctx, `
 		SELECT `+columns+` FROM memory
 		WHERE scope = $1 AND ($2 = '' OR type = $2)
+		  AND md5(content_key) = md5(lower(regexp_replace(regexp_replace(btrim($3::text), '\s+', ' ', 'g'), '[.!。]+$', '')))
 		  AND content_key = lower(regexp_replace(regexp_replace(btrim($3::text), '\s+', ' ', 'g'), '[.!。]+$', ''))
 		  AND status IN ('active', 'proposed')
 		  AND (expires_at IS NULL OR expires_at > now())
@@ -719,7 +757,7 @@ func (s *Store) SetEmbedding(ctx context.Context, id string, v []float32, model 
 // BackfillStats reports the outcome of Backfill.
 type BackfillStats struct {
 	Embedded int // rows that received an embedding
-	Skipped  int // rows the provider could not embed; retried on the next run
+	Skipped  int // rows rejected by the provider or changed meanwhile; retried on the next run
 }
 
 // Backfill embeds active and proposed memories that have no embedding from
@@ -770,14 +808,26 @@ func (s *Store) Backfill(ctx context.Context, e Embedder, batch int) (BackfillSt
 				st.Skipped++
 				continue
 			}
-			if _, verr := vectorParam(vecs[i]); verr != nil {
+			vec, verr := vectorParam(vecs[i])
+			if verr != nil {
 				st.Skipped++ // e.g. wrong dimension or NaN from the provider
 				continue
 			}
-			if err := s.SetEmbedding(ctx, t.ID, vecs[i], model); err != nil && !errors.Is(err, ErrNotFound) {
+			if vec == nil || model == "" {
+				return st, errors.New("backfill: vector and model are required")
+			}
+			// Rewrite clears the vector when removing a secret. Never put the
+			// vector of its old text back after that update has committed.
+			ct, err := s.pool.Exec(ctx, `UPDATE memory SET embedding = $2::text::vector, embedding_model = $3
+				WHERE id = $1 AND content = $4 AND status IN ('active', 'proposed')`, t.ID, vec, model, t.Content)
+			if err != nil {
 				return st, fmt.Errorf("backfill: %s: %w", t.ID, err)
 			}
-			st.Embedded++
+			if ct.RowsAffected() == 1 {
+				st.Embedded++
+			} else {
+				st.Skipped++
+			}
 		}
 		after = &todo[len(todo)-1].ID
 	}
