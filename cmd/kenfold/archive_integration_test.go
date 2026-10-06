@@ -171,6 +171,15 @@ func TestArchiveIntegration(t *testing.T) {
 		"truncated":   strings.Join(lines[:len(lines)-2], "\n"),
 		"not kenfold": `{"format":"other/1"}`,
 		"secret":      lines[0] + "\n" + strings.Replace(lines[1], `"content":"`, `"content":"token `+secret+` `, 1) + "\n" + strings.Join(lines[2:], "\n"),
+		"metadata secret": lines[0] + "\n" + strings.Join(lines[1:len(lines)-1], "\n") + "\n" +
+			`{"memory":{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","type":"semantic","scope":"user","content":"A safe fact.","source_agent":"codex","trust":"agent","status":"active","attrs":{"nested":[{"next_steps":["` + secret + `"]}]}}}` + "\n" +
+			`{"end":{"memories":8,"edges":1,"refs":2}}`,
+		"array credential": lines[0] + "\n" + strings.Join(lines[1:len(lines)-1], "\n") + "\n" +
+			`{"memory":{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","type":"semantic","scope":"user","content":"A safe fact.","source_agent":"codex","trust":"agent","status":"active","attrs":{"api_key":["a9Q2v7R4z6P1t8M3"]}}}` + "\n" +
+			`{"end":{"memories":8,"edges":1,"refs":2}}`,
+		"object credential": lines[0] + "\n" + strings.Join(lines[1:len(lines)-1], "\n") + "\n" +
+			`{"memory":{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","type":"semantic","scope":"user","content":"A safe fact.","source_agent":"codex","trust":"agent","status":"active","attrs":{"api_key":{"value":"a9Q2v7R4z6P1t8M3"}}}}` + "\n" +
+			`{"end":{"memories":8,"edges":1,"refs":2}}`,
 		"unknown key": lines[0] + "\n" + `{"memory":{"id":"x"},"surprise":1}`,
 	} {
 		f := filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".jsonl")

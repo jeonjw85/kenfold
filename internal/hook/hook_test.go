@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,6 +29,7 @@ type fakeServer struct {
 	mu          sync.Mutex
 	ctxOut      mcpserver.GetContextOutput
 	rememberErr string
+	unavailable bool
 	contexts    []string // project argument of each get_context
 	remembers   []rememberCall
 	auth        []string
@@ -65,7 +67,12 @@ func newFakeServer(t *testing.T) *fakeServer {
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.auth = append(f.auth, r.Header.Get("Authorization"))
+		unavailable := f.unavailable
 		f.mu.Unlock()
+		if unavailable {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		switch r.URL.Path {
 		case "/api/v1/refs":
 			f.mu.Lock()
@@ -213,10 +220,11 @@ func TestSessionLifecycle(t *testing.T) {
 
 func TestServerDownSpoolsThenFlushes(t *testing.T) {
 	repo := gitRepo(t, "git@github.com:org/repo.git")
-	down := httptest.NewServer(http.NotFoundHandler())
-	downURL := down.URL
-	down.Close() // nothing listens here any more
-	h := newHarness(t, downURL)
+	f := newFakeServer(t)
+	f.mu.Lock()
+	f.unavailable = true
+	f.mu.Unlock()
+	h := newHarness(t, f.srv.URL)
 	h.opts.SendTimeout = 500 * time.Millisecond
 	const sid = "s-down"
 
@@ -237,8 +245,9 @@ func TestServerDownSpoolsThenFlushes(t *testing.T) {
 	}
 
 	// The server comes back; the next session start delivers the summary.
-	f := newFakeServer(t)
-	h.opts.URL = f.srv.URL
+	f.mu.Lock()
+	f.unavailable = false
+	f.mu.Unlock()
 	if _, err := h.run(map[string]any{"hook_event_name": "SessionStart", "session_id": "s-next", "cwd": repo}); err != nil {
 		t.Fatal(err)
 	}
@@ -248,6 +257,131 @@ func TestServerDownSpoolsThenFlushes(t *testing.T) {
 	}
 	if n := len(st.spooled()); n != 0 {
 		t.Errorf("spool after flush = %d", n)
+	}
+}
+
+func TestSpoolOnlyFlushesToOriginalDestination(t *testing.T) {
+	for _, change := range []string{"api key", "endpoint", "unauthenticated client", "client with bearer"} {
+		t.Run(change, func(t *testing.T) {
+			f := newFakeServer(t)
+			f.rememberErr = "internal error: temporarily unavailable"
+			h := newHarness(t, f.srv.URL)
+			if change == "unauthenticated client" || change == "client with bearer" {
+				h.opts.ClientName = "agent-a"
+				if change == "unauthenticated client" {
+					h.opts.APIKey = ""
+				}
+			}
+			original := h.opts
+			repo := gitRepo(t, "git@github.com:org/repo.git")
+			for _, in := range []map[string]any{
+				{"hook_event_name": "UserPromptSubmit", "session_id": "agent-a-session", "cwd": repo, "prompt": "fix attribution"},
+				{"hook_event_name": "SessionEnd", "session_id": "agent-a-session", "cwd": repo},
+			} {
+				if _, err := h.run(in); err != nil {
+					t.Fatal(err)
+				}
+			}
+			st := state{dir: h.opts.StateDir}
+			files := st.spooled()
+			if len(files) != 1 {
+				t.Fatalf("spooled = %d, want 1", len(files))
+			}
+			data, err := os.ReadFile(files[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if original.APIKey != "" && bytes.Contains(data, []byte(original.APIKey)) {
+				t.Fatal("spool contains a plaintext API key")
+			}
+			f.mu.Lock()
+			f.rememberErr = ""
+			f.mu.Unlock()
+			target := f
+			switch change {
+			case "api key":
+				h.opts.APIKey = "kf_other-agent"
+			case "endpoint":
+				target = newFakeServer(t)
+				h.opts.URL = target.srv.URL
+			case "unauthenticated client", "client with bearer":
+				h.opts.ClientName = "agent-b"
+			}
+			if _, err := h.run(map[string]any{"hook_event_name": "SessionStart", "cwd": repo}); err != nil {
+				t.Fatal(err)
+			}
+			if len(target.calls()) != 0 || len(st.spooled()) != 1 {
+				t.Fatalf("foreign destination sent or discarded summary: calls=%d spool=%d", len(target.calls()), len(st.spooled()))
+			}
+			h.opts = original
+			if _, err := h.run(map[string]any{"hook_event_name": "SessionStart", "cwd": repo}); err != nil {
+				t.Fatal(err)
+			}
+			if calls := f.calls(); len(calls) != 1 || calls[0].Session != "agent-a-session" || len(st.spooled()) != 0 {
+				t.Errorf("original destination did not recover summary: calls=%+v spool=%d", calls, len(st.spooled()))
+			}
+		})
+	}
+}
+
+func TestFlushPreservesUnboundLegacySummary(t *testing.T) {
+	f := newFakeServer(t)
+	h := newHarness(t, f.srv.URL)
+	var stderr bytes.Buffer
+	h.opts.Stderr = &stderr
+	st := state{dir: h.opts.StateDir}
+	file, err := st.spool(pending{Project: "github.com/org/repo", Content: "legacy summary", Type: "episodic", CreatedAt: h.now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.run(map[string]any{"hook_event_name": "SessionStart"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(file); err != nil || len(f.calls()) != 0 {
+		t.Errorf("legacy summary was sent or removed: stat=%v calls=%d", err, len(f.calls()))
+	}
+	if !strings.Contains(stderr.String(), "unbound") {
+		t.Errorf("no warning about unbound legacy summary: %q", stderr.String())
+	}
+}
+
+func TestFlushForeignSummariesDoNotExhaustSendLimit(t *testing.T) {
+	f := newFakeServer(t)
+	f.rememberErr = "internal error"
+	h := newHarness(t, f.srv.URL)
+	repo := gitRepo(t, "git@github.com:org/repo.git")
+	st := state{dir: h.opts.StateDir}
+	for _, sid := range []string{"foreign", "own"} {
+		if sid == "own" {
+			h.opts.APIKey = "kf_own"
+		}
+		if _, err := h.run(map[string]any{"hook_event_name": "UserPromptSubmit", "session_id": sid, "cwd": repo, "prompt": "a queued request"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.run(map[string]any{"hook_event_name": "SessionEnd", "session_id": sid, "cwd": repo}); err != nil {
+			t.Fatal(err)
+		}
+		if sid == "foreign" {
+			p, err := st.load(st.spooled()[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := range 20 {
+				p.CreatedAt = p.CreatedAt.Add(time.Duration(i+1) * time.Nanosecond)
+				if _, err := st.spool(p); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	f.mu.Lock()
+	f.rememberErr = ""
+	f.mu.Unlock()
+	if _, err := h.run(map[string]any{"hook_event_name": "SessionStart", "cwd": repo}); err != nil {
+		t.Fatal(err)
+	}
+	if calls := f.calls(); len(calls) != 1 || calls[0].Session != "own" || len(st.spooled()) != 21 {
+		t.Errorf("foreign records consumed send budget: calls=%+v remaining=%d", calls, len(st.spooled()))
 	}
 }
 
@@ -304,6 +438,78 @@ func TestNoCaptureAndOutsideRepo(t *testing.T) {
 	}
 }
 
+func TestCaptureOutsideRepositoryDoesNotRecord(t *testing.T) {
+	for _, event := range []struct{ name, field string }{
+		{"UserPromptSubmit", "prompt"}, {"Stop", "last_assistant_message"}, {"PostCompact", "compact_summary"},
+	} {
+		t.Run(event.name, func(t *testing.T) {
+			h := newHarness(t, "http://127.0.0.1:1/mcp")
+			const sid = "private-session"
+			if _, err := h.run(map[string]any{"hook_event_name": event.name, "session_id": sid, "cwd": t.TempDir(), event.field: "private text outside a repository"}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(state{dir: h.opts.StateDir}.sessionFile(sid)); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("non-repository capture created a session file: %v", err)
+			}
+		})
+	}
+}
+
+func TestCaptureOutsideRepositoryAfterSessionStartDoesNotRecord(t *testing.T) {
+	f := newFakeServer(t)
+	h := newHarness(t, f.srv.URL)
+	repo := gitRepo(t, "git@github.com:org/repo.git")
+	const sid = "changed-directory"
+	if _, err := h.run(map[string]any{"hook_event_name": "SessionStart", "session_id": sid, "cwd": repo}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.run(map[string]any{"hook_event_name": "UserPromptSubmit", "session_id": sid, "cwd": t.TempDir(), "prompt": "private unrelated text"}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := (state{dir: h.opts.StateDir}).read(sid)
+	if err != nil || len(events) != 1 || events[0].Kind != kindStart {
+		t.Errorf("outside text appended to existing session: %+v, %v", events, err)
+	}
+}
+
+func TestCaptureDifferentRepositoryKeepsOriginalProjectBinding(t *testing.T) {
+	for _, started := range []bool{false, true} {
+		for _, event := range []struct{ name, field string }{
+			{"UserPromptSubmit", "prompt"}, {"Stop", "last_assistant_message"}, {"PostCompact", "compact_summary"},
+		} {
+			t.Run(fmt.Sprintf("started=%v/%s", started, event.name), func(t *testing.T) {
+				f := newFakeServer(t)
+				h := newHarness(t, f.srv.URL)
+				a := gitRepo(t, "git@github.com:org/project-a.git")
+				b := gitRepo(t, "git@github.com:org/project-b.git")
+				const sid = "moving-session"
+				if started {
+					if _, err := h.run(map[string]any{"hook_event_name": "SessionStart", "session_id": sid, "cwd": a}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for _, in := range []map[string]any{
+					{"hook_event_name": "UserPromptSubmit", "session_id": sid, "cwd": a, "prompt": "work on project A"},
+					{"hook_event_name": event.name, "session_id": sid, "cwd": b, event.field: "unrelated text from project B"},
+					{"hook_event_name": "SessionEnd", "session_id": sid, "cwd": b},
+				} {
+					if _, err := h.run(in); err != nil {
+						t.Fatal(err)
+					}
+				}
+				calls := f.calls()
+				if len(calls) != 1 || calls[0].In.Project != "github.com/org/project-a" || strings.Contains(calls[0].In.Content, "project B") {
+					t.Errorf("project switch contaminated/misrouted summary: %+v", calls)
+				}
+				data, err := os.ReadFile(state{dir: h.opts.StateDir}.sessionFile(sid))
+				if err != nil || bytes.Contains(data, []byte("unrelated text")) {
+					t.Errorf("captured unrelated project text: err=%v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestInputHandling(t *testing.T) {
 	h := newHarness(t, "http://127.0.0.1:1/mcp")
 	var out bytes.Buffer
@@ -333,10 +539,11 @@ func TestInputHandling(t *testing.T) {
 
 func TestCaptureRedactsBeforeTruncation(t *testing.T) {
 	h := newHarness(t, "http://127.0.0.1:1/mcp")
+	repo := gitRepo(t, "git@github.com:org/repo.git")
 	const sid = "redaction-boundary"
 	secret := "ghp_" + strings.Repeat("Zq8", 12)
 	text := strings.Repeat("x", maxStoredRunes-20) + " " + secret
-	if _, err := h.run(map[string]any{"hook_event_name": "UserPromptSubmit", "session_id": sid, "prompt": text}); err != nil {
+	if _, err := h.run(map[string]any{"hook_event_name": "UserPromptSubmit", "session_id": sid, "cwd": repo, "prompt": text}); err != nil {
 		t.Fatal(err)
 	}
 	events, err := (state{dir: h.opts.StateDir}).read(sid)

@@ -225,7 +225,7 @@ func validArchiveScope(scope string) bool {
 
 // validRecord checks a record against the invariants the database enforces,
 // so a bad archive fails with a line number instead of a constraint name,
-// and rejects content with credentials, like remember does.
+// and rejects credentials in content and metadata, like remember does.
 func validRecord(r store.ArchiveRecord) error {
 	set := 0
 	for _, b := range []bool{r.Memory != nil, r.Edge != nil, r.Ref != nil, r.End != nil} {
@@ -235,6 +235,20 @@ func validRecord(r store.ArchiveRecord) error {
 	}
 	if set != 1 {
 		return errors.New("each record must hold exactly one of memory, edge, ref, end")
+	}
+	// Inspect decoded strings, not escaped JSON: credentials can also live in
+	// nested attrs, provenance, and code references. Check before diagnostics
+	// that might quote an invalid field containing a credential.
+	b, err := json.Marshal(r)
+	if err != nil {
+		return errors.New("record is not valid JSON")
+	}
+	var value any
+	if err := json.Unmarshal(b, &value); err != nil {
+		return err
+	}
+	if label := archiveSecret(value); label != "" {
+		return fmt.Errorf("record contains a %s; remove it and export again", label)
 	}
 	switch {
 	case r.Memory != nil:
@@ -270,9 +284,6 @@ func validRecord(r store.ArchiveRecord) error {
 		if strings.TrimSpace(m.Content) == "" {
 			return fmt.Errorf("memory %s: empty content", m.ID)
 		}
-		if fs := secrets.Scan(m.Content); len(fs) > 0 {
-			return fmt.Errorf("memory %s contains a %s; remove it (kenfold scan --redact on the source) and export again", m.ID, fs[0].Label)
-		}
 		if m.Type == memory.TypeTemporary && m.ExpiresAt == nil {
 			return fmt.Errorf("memory %s: temporary memories need expires_at", m.ID)
 		}
@@ -307,4 +318,36 @@ func validRecord(r store.ArchiveRecord) error {
 		}
 	}
 	return nil
+}
+
+func archiveSecret(value any, fields ...string) string {
+	switch v := value.(type) {
+	case string:
+		if fs := secrets.Scan(v); len(fs) > 0 {
+			return fs[0].Label
+		}
+		// Preserve secret-named ancestors through containers, e.g.
+		// {"api_key":[{"value":"<random-looking credential>"}]}.
+		for _, field := range fields {
+			if fs := secrets.Scan(field + "=" + v); len(fs) > 0 {
+				return fs[0].Label
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if label := archiveSecret(item, fields...); label != "" {
+				return label
+			}
+		}
+	case map[string]any:
+		for key, item := range v {
+			if label := archiveSecret(key); label != "" {
+				return label
+			}
+			if label := archiveSecret(item, append(fields, key)...); label != "" {
+				return label
+			}
+		}
+	}
+	return ""
 }

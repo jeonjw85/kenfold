@@ -546,7 +546,7 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	}
 	switch f.Get("grant_type") {
 	case "authorization_code":
-		rec, err := s.store.useCode(r.Context(), f.Get("code"), clientID, f.Get("redirect_uri"))
+		t, err := s.store.exchangeCode(r.Context(), f.Get("code"), clientID, f.Get("redirect_uri"), f.Get("code_verifier"))
 		switch {
 		case errors.Is(err, errReuse):
 			s.log.WarnContext(r.Context(), "oauth authorization code reused; grant revoked", "client_id", clientID)
@@ -556,15 +556,6 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 			oauthError(w, http.StatusBadRequest, "invalid_grant", "invalid, expired, or used authorization code")
 			return
 		case err != nil:
-			s.serverError(w, r, "token", err)
-			return
-		}
-		if !pkceMatches(f.Get("code_verifier"), rec.challenge) {
-			oauthError(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
-			return
-		}
-		t, err := s.store.issue(r.Context(), s.store.pool, rec.grant, nil)
-		if err != nil {
 			s.serverError(w, r, "token", err)
 			return
 		}

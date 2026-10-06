@@ -52,6 +52,58 @@ func TestArchiveDryRunValidation(t *testing.T) {
 	}
 }
 
+func TestArchiveRejectsSecretsInMetadata(t *testing.T) {
+	token := "ghp_" + strings.Repeat("Q7x", 12)
+	for name, mutate := range map[string]func(*store.ArchivedMemory){
+		"next steps": func(m *store.ArchivedMemory) { m.Attrs = map[string]any{"next_steps": []string{"use " + token}} },
+		"nested arrays": func(m *store.ArchivedMemory) {
+			m.Attrs = map[string]any{"nested": []any{nil, true, 3, []any{map[string]any{"evidence": token}}}}
+		},
+		"secret map key": func(m *store.ArchivedMemory) { m.Attrs = map[string]any{token: "value"} },
+		"named credential": func(m *store.ArchivedMemory) {
+			m.Attrs = map[string]any{"credentials": map[string]any{"api_key": "a9Q2v7R4z6P1t8M3"}}
+		},
+		"array credential": func(m *store.ArchivedMemory) {
+			m.Attrs = map[string]any{"api_key": []any{"a9Q2v7R4z6P1t8M3"}}
+		},
+		"object credential": func(m *store.ArchivedMemory) {
+			m.Attrs = map[string]any{"api_key": map[string]any{"value": "a9Q2v7R4z6P1t8M3"}}
+		},
+		"deep credential containers": func(m *store.ArchivedMemory) {
+			m.Attrs = map[string]any{"api_key": []any{map[string]any{"wrapper": []any{"a9Q2v7R4z6P1t8M3"}}}}
+		},
+		"escaped private key": func(m *store.ArchivedMemory) {
+			m.Attrs = map[string]any{"evidence": "-----BEGIN RSA PRIVATE KEY-----\nkey material\n-----END RSA PRIVATE KEY-----"}
+		},
+		"source session": func(m *store.ArchivedMemory) { m.SourceSession = &token },
+		"evidence URI":   func(m *store.ArchivedMemory) { m.EvidenceURI = &token },
+		"source agent":   func(m *store.ArchivedMemory) { m.SourceAgent = token },
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := store.ArchivedMemory{ID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", Type: memory.TypeSemantic,
+				Scope: "user", Content: "A harmless imported fact.", SourceAgent: "codex", Trust: memory.TrustAgent, Status: memory.StatusActive}
+			mutate(&m)
+			err := dryRunArchive(t, m, "")
+			if err == nil {
+				t.Fatal("archive metadata credential accepted")
+			}
+			if strings.Contains(err.Error(), token) || strings.Contains(err.Error(), "a9Q2v7R4z6P1t8M3") {
+				t.Fatal("archive validation echoed a credential")
+			}
+		})
+	}
+	m := store.ArchivedMemory{ID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", Type: memory.TypeSemantic,
+		Scope: "user", Content: "A harmless imported fact.", SourceAgent: "codex", Trust: memory.TrustAgent, Status: memory.StatusActive,
+		Attrs: map[string]any{"next_steps": []string{"rotate the password"}, "api_key": []any{map[string]any{"value": "<your-key>"}}, "evidence": "Answer in Korean."}}
+	if err := dryRunArchive(t, m, ""); err != nil {
+		t.Errorf("benign metadata rejected: %v", err)
+	}
+	ref := store.ArchivedRef{MemoryID: m.ID, Scope: "project:github.com/acme/repo", Path: "src/a.go", Symbol: token, State: "pending"}
+	if err := validRecord(store.ArchiveRecord{Ref: &ref}); err == nil {
+		t.Error("code reference credential accepted")
+	}
+}
+
 func dryRunArchive(t *testing.T, m store.ArchivedMemory, suffix string) error {
 	t.Helper()
 	header, _ := json.Marshal(store.ArchiveHeader{Format: store.ArchiveFormat})

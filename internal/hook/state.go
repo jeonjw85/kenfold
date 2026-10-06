@@ -34,11 +34,12 @@ type event struct {
 
 // pending is a spooled remember call.
 type pending struct {
-	Project   string    `json:"project"`
-	Content   string    `json:"content"`
-	Type      string    `json:"type"`
-	SessionID string    `json:"session_id"`
-	CreatedAt time.Time `json:"created_at"`
+	Project     string    `json:"project"`
+	Content     string    `json:"content"`
+	Type        string    `json:"type"`
+	SessionID   string    `json:"session_id"`
+	CreatedAt   time.Time `json:"created_at"`
+	Destination string    `json:"destination,omitempty"` // endpoint + identity fingerprint, never a credential
 }
 
 // state is the hook's local directory:
