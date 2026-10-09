@@ -2,6 +2,7 @@ package bench
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strconv"
 	"testing"
@@ -26,13 +27,67 @@ import (
 //
 // KENFOLD_BENCH_EXTRACT=1 also runs the production extractor on LoCoMo
 // (KENFOLD_EVAL_CHAT_URL). KENFOLD_BENCH_LIMIT caps questions per dataset.
+// KENFOLD_BENCH_BUDGET_USD bounds reader/judge API calls when token prices
+// KENFOLD_BENCH_INPUT_USD_PER_M and KENFOLD_BENCH_OUTPUT_USD_PER_M are provided.
+// Prices must cover both models and context tiers; reasoning must be "none".
+// KENFOLD_BENCH_USAGE_FILE persists that allowance across process restarts.
+// KENFOLD_BENCH_EXTRACT_CACHE with KENFOLD_BENCH_EXTRACT_ID checkpoints sessions;
+// the identity must pin weights, extractor code/schema and inference settings.
+// KENFOLD_BENCH_SCORE_CACHE with KENFOLD_BENCH_SCORE_ID checkpoints each QA phase;
+// pin dataset/input state, scoring/retrieval code and all model settings. Reuse
+// the same private cache and budget journal on restart; uncertain calls stop.
 // Results are written to testdata/RESULTS.md.
 func TestBench(t *testing.T) {
+	answerOptions, err := answerOptionsFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
 	dbURL := os.Getenv("KENFOLD_TEST_DATABASE_URL")
 	embedURL := os.Getenv("KENFOLD_EVAL_EMBED_URL")
 	chatURL := os.Getenv("KENFOLD_BENCH_CHAT_URL")
 	if dbURL == "" || embedURL == "" || chatURL == "" {
 		t.Skip("KENFOLD_TEST_DATABASE_URL, KENFOLD_EVAL_EMBED_URL, and KENFOLD_BENCH_CHAT_URL not set")
+	}
+	var scoreCache *ScoreCache
+	if dir, identity := os.Getenv("KENFOLD_BENCH_SCORE_CACHE"), os.Getenv("KENFOLD_BENCH_SCORE_ID"); dir != "" || identity != "" {
+		var err error
+		scoreCache, err = NewScoreCache(dir, identity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := scoreCache.Close(); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	if err := validateAnswerOptions(answerOptions, scoreCache); err != nil {
+		t.Fatal(err)
+	}
+	budget, err := budgetFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path := os.Getenv("KENFOLD_BENCH_USAGE_FILE"); path != "" {
+		if budget == nil {
+			t.Fatal("KENFOLD_BENCH_USAGE_FILE requires a configured budget")
+		}
+		if os.Getenv("KENFOLD_BENCH_USAGE_CREATE") == "1" {
+			err = budget.initJournal(path)
+		} else {
+			err = budget.enableJournal(path)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := budget.closeJournal(); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	if budget != nil {
+		defer func() { t.Log(budget.Note()) }()
 	}
 	ctx := context.Background()
 	dir := os.Getenv("KENFOLD_BENCH_DATA")
@@ -77,7 +132,13 @@ func TestBench(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	d := Deps{Store: store.New(pool), Pool: pool, Embedder: emb, Reader: reader, Judge: judge, Log: t.Logf}
+	d := Deps{Store: store.New(pool), Pool: pool, Embedder: emb, Reader: reader, Judge: judge, ScoreCache: scoreCache, Budget: budget, Log: t.Logf, AnswerOptions: answerOptions}
+	if dir := os.Getenv("KENFOLD_BENCH_EXTRACT_CACHE"); dir != "" {
+		d.ExtractCache, err = NewExtractionCache(dir, os.Getenv("KENFOLD_BENCH_EXTRACT_ID"))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	if u := os.Getenv("KENFOLD_EVAL_RERANK_URL"); u != "" {
 		rc, err := rerank.New(rerank.Config{BaseURL: u, Model: envOr("KENFOLD_EVAL_RERANK_MODEL", "bge-reranker-v2-m3"), Timeout: time.Minute})
 		if err != nil {
@@ -102,9 +163,25 @@ func TestBench(t *testing.T) {
 		cfg.Extract = true
 	}
 
-	rep, err := Run(ctx, d, cfg)
-	if err != nil {
-		t.Fatal(err)
+	rep, runErr := Run(ctx, d, cfg)
+	reportBench(t, rep, runErr, budget, cfg.Limit)
+}
+
+// Reporting must precede failure for every Run error, not only budget stops.
+func reportBench(t *testing.T, rep Report, runErr error, budget *Budget, limit int) {
+	t.Helper()
+	if budget != nil {
+		rep.Notes = append(rep.Notes, budget.Note())
+	}
+	if limit > 0 {
+		rep.Notes = append(rep.Notes, "PARTIAL: question-limited run in dataset order; not the complete LoCoMo benchmark. A limit that truncates the LongMemEval selection does not create a new stratified subset.")
+	}
+	if runErr != nil {
+		if !errors.Is(runErr, ErrBudgetExceeded) && !errors.Is(runErr, ErrBudgetUsageUnavailable) {
+			rep.Notes = append(rep.Notes, "PARTIAL: evaluation stopped after a benchmark error. Only completed results are included; unfinished questions and datasets were not evaluated.")
+		} else {
+			rep.Notes = append(rep.Notes, "PARTIAL: evaluation stopped to protect the API budget. Only completed answer/judge pairs are included; remaining questions and datasets were not evaluated.")
+		}
 	}
 	md := rep.Markdown()
 	t.Log("\n" + md)
@@ -113,6 +190,9 @@ func TestBench(t *testing.T) {
 	}
 	if err := os.WriteFile("testdata/RESULTS.md", []byte(md), 0o644); err != nil {
 		t.Fatal(err)
+	}
+	if runErr != nil {
+		t.Error(runErr)
 	}
 	for _, s := range rep.Sets {
 		for _, row := range s.Rows {
