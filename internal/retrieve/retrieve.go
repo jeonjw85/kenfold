@@ -130,6 +130,7 @@ type candidate struct {
 
 // Search returns memories relevant to q, best first. Scores are in (0, 1].
 func (r *Retriever) Search(ctx context.Context, q Query) ([]store.Scored, error) {
+	started := time.Now()
 	o := r.Options
 	limit := q.Limit
 	if limit <= 0 {
@@ -143,7 +144,9 @@ func (r *Retriever) Search(ctx context.Context, q Query) ([]store.Scored, error)
 	if vec := r.embed(ctx, q.Text); vec != nil {
 		p.Vector, p.Model = vec, r.Embedder.Model()
 	}
+	stageStart := time.Now()
 	first, err := r.Store.Search(ctx, p)
+	r.trace(ctx, "first-stage", stageStart, first, err != nil)
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +171,10 @@ func (r *Retriever) Search(ctx context.Context, q Query) ([]store.Scored, error)
 			}
 		}
 		sortCandidates(cands)
+		stageStart = time.Now()
+		r.traceCandidates(ctx, "rerank-input", stageStart, cands[:min(cmp.Or(o.RerankTop, defaultRerankTop), len(cands))], false)
 		reranked = r.rerank(ctx, q.Text, cands)
+		r.traceCandidates(ctx, "rerank", stageStart, cands, !reranked)
 	}
 	if !reranked {
 		// Without the reranker's judgment, graph neighbors are guesses on the
@@ -178,6 +184,7 @@ func (r *Retriever) Search(ctx context.Context, q Query) ([]store.Scored, error)
 			c.score = c.first
 		}
 	}
+	stageStart = time.Now()
 	if !o.NoStale {
 		r.applyStaleness(ctx, cands)
 	}
@@ -192,16 +199,43 @@ func (r *Retriever) Search(ctx context.Context, q Query) ([]store.Scored, error)
 		}
 	}
 	sortCandidates(cands)
+	r.traceCandidates(ctx, "signals", stageStart, cands, false)
 
 	out := make([]store.Scored, 0, min(limit, len(cands)))
 	for _, c := range cands[:min(limit, len(cands))] {
 		out = append(out, store.Scored{Memory: c.m, Score: clampScore(c.score)})
 	}
+	r.trace(ctx, "final", started, out, false)
 	return out, nil
+}
+
+// Diagnostics contain only IDs, scores and timing, never memory/query text or
+// provider errors. They do not reorder or otherwise affect the candidates.
+func (r *Retriever) trace(ctx context.Context, stage string, started time.Time, hits []store.Scored, degraded bool) {
+	if r.Logger == nil || !r.Logger.Enabled(ctx, slog.LevelDebug) {
+		return
+	}
+	ids, scores := make([]string, len(hits)), make([]float64, len(hits))
+	for i, h := range hits {
+		ids[i], scores[i] = h.ID, h.Score
+	}
+	r.Logger.DebugContext(ctx, "retrieval stage", "stage", stage, "ids", ids, "scores", scores, "count", len(hits), "elapsed_ms", float64(time.Since(started).Microseconds())/1000, "degraded", degraded)
+}
+
+func (r *Retriever) traceCandidates(ctx context.Context, stage string, started time.Time, cands []*candidate, degraded bool) {
+	if r.Logger == nil || !r.Logger.Enabled(ctx, slog.LevelDebug) {
+		return
+	}
+	hits := make([]store.Scored, len(cands))
+	for i, c := range cands {
+		hits[i] = store.Scored{Memory: c.m, Score: c.score}
+	}
+	r.trace(ctx, stage, started, hits, degraded)
 }
 
 // expand adds graph neighbors of the top candidates.
 func (r *Retriever) expand(ctx context.Context, q Query, cands []*candidate, byID map[string]*candidate) []*candidate {
+	started := time.Now()
 	seeds := make([]string, 0, graphSeeds)
 	for _, c := range cands[:min(graphSeeds, len(cands))] {
 		seeds = append(seeds, c.m.ID)
@@ -215,6 +249,7 @@ func (r *Retriever) expand(ctx context.Context, q Query, cands []*candidate, byI
 	}
 	nbrs, err := r.Store.Neighbors(ctx, store.NeighborParams{Seeds: seeds, Scopes: scopes, Types: q.Types})
 	if err != nil {
+		r.traceCandidates(ctx, "graph", started, cands, true)
 		r.logger().WarnContext(ctx, "graph expansion failed; ranking without it", "err", err)
 		return cands
 	}
@@ -232,6 +267,7 @@ func (r *Retriever) expand(ctx context.Context, q Query, cands []*candidate, byI
 		}
 		c.graph = max(c.graph, s)
 	}
+	r.traceCandidates(ctx, "graph", started, cands, false)
 	return cands
 }
 
@@ -259,15 +295,18 @@ func (r *Retriever) rerank(ctx context.Context, query string, cands []*candidate
 
 // applyStaleness lowers the scores of memories whose code references are stale.
 func (r *Retriever) applyStaleness(ctx context.Context, cands []*candidate) {
+	started := time.Now()
 	ids := make([]string, len(cands))
 	for i, c := range cands {
 		ids[i] = c.m.ID
 	}
 	refs, err := r.Store.Refs(ctx, ids)
 	if err != nil {
+		r.traceCandidates(ctx, "staleness", started, cands, true)
 		r.logger().WarnContext(ctx, "code references unavailable; ranking without staleness", "err", err)
 		return
 	}
+	r.traceCandidates(ctx, "staleness", started, cands, false)
 	for _, c := range cands {
 		c.score *= staleFactor(refs[c.m.ID])
 	}
@@ -345,7 +384,9 @@ func (r *Retriever) embed(ctx context.Context, text string) []float32 {
 	}
 	ctx, cancel := context.WithTimeout(ctx, embedTimeout)
 	defer cancel()
+	started := time.Now()
 	vecs, err := r.Embedder.Embed(ctx, []string{text})
+	r.trace(ctx, "embedding", started, nil, err != nil || len(vecs) != 1)
 	if err != nil || len(vecs) != 1 {
 		r.logger().WarnContext(ctx, "embedding failed; using full-text search only", "err", err)
 		return nil

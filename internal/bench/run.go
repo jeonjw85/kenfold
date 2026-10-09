@@ -3,6 +3,7 @@ package bench
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -26,14 +27,27 @@ const (
 // Deps is what a run needs. Extractor is optional; when nil the extraction
 // arm is skipped.
 type Deps struct {
-	Store     *store.Store
-	Pool      *pgxpool.Pool
-	Embedder  store.Embedder
-	Reranker  retrieve.Reranker
-	Reader    *chat.Client
-	Judge     *chat.Client
-	Extractor extract.Chat
-	Log       func(string, ...any)
+	Store         *store.Store
+	Pool          *pgxpool.Pool
+	Embedder      store.Embedder
+	Reranker      retrieve.Reranker
+	Reader        *chat.Client
+	Judge         *chat.Client
+	Extractor     extract.Chat
+	ExtractCache  *ExtractionCache
+	ScoreCache    *ScoreCache
+	Budget        *Budget
+	Log           func(string, ...any)
+	AnswerOptions AnswerOptions
+	LoCoMoIndex   LoCoMoTurnIndex
+}
+
+// AnswerOptions selects opt-in benchmark answer policies. The zero value
+// preserves the original reader, isolated-turn context and checkpoint bytes.
+type AnswerOptions struct {
+	ReaderPolicy  string
+	ContextPolicy string
+	CaptureInputs bool
 }
 
 // Config selects the run. Limit caps questions per dataset (0 means all of
@@ -65,20 +79,26 @@ type SetResult struct {
 
 // Row is one question type, or "all".
 type Row struct {
-	Label    string
-	N        int
-	F1       float64
-	HasF1    bool
-	Judge    int
-	Recall5  float64
-	Recall10 float64
-	RecallN  int
-	Errors   int
+	Label         string
+	N             int
+	F1            float64
+	HasF1         bool
+	Judge         int
+	Recall5       float64
+	Recall10      float64
+	RecallN       int
+	Errors        int
+	ContextRecall float64
+	ContextN      int
+	HasContext    bool
 }
 
 // Run loads the datasets, stores them, and scores retrieval plus answers.
 // It truncates the memory table first.
 func Run(ctx context.Context, d Deps, cfg Config) (Report, error) {
+	if err := validateAnswerOptions(d.AnswerOptions, d.ScoreCache); err != nil {
+		return Report{}, err
+	}
 	if cfg.LMEN <= 0 {
 		cfg.LMEN = DefaultLMEN
 	}
@@ -102,17 +122,23 @@ func Run(ctx context.Context, d Deps, cfg Config) (Report, error) {
 	if d.Reranker != nil {
 		rep.Rerank = d.Reranker.Model()
 	}
+	if d.AnswerOptions.ReaderPolicy != "" {
+		rep.Notes = append(rep.Notes, "Opt-in reader policy: "+d.AnswerOptions.ReaderPolicy+". Reader policy improvements are not retrieval improvements.")
+	}
+	if d.AnswerOptions.ContextPolicy != "" {
+		rep.Notes = append(rep.Notes, "Raw LoCoMo uses same-session neighbors (radius 1, 20000 content bytes). Extracted and LME context is unchanged; seed recall@5/10 excludes neighbors. Reader context recall measures labeled coverage, not sufficient context.")
+	}
 	if _, err := d.Pool.Exec(ctx, `TRUNCATE memory CASCADE`); err != nil {
 		return rep, err
 	}
 	if _, err := d.Embedder.Embed(ctx, []string{"ping"}); err != nil {
 		return rep, fmt.Errorf("embedder: %w", err)
 	}
-	if _, err := completeText(ctx, d.Reader, "", "Reply with the single word ok.", 8); err != nil {
+	if _, err := completeText(ctx, d.Reader, "", "Reply with the single word ok.", 8, d.Budget); err != nil {
 		return rep, fmt.Errorf("reader: %w", err)
 	}
 	if d.Judge != d.Reader {
-		if _, err := completeText(ctx, d.Judge, "", "Reply with the single word ok.", 8); err != nil {
+		if _, err := completeText(ctx, d.Judge, "", "Reply with the single word ok.", 8, d.Budget); err != nil {
 			return rep, fmt.Errorf("judge: %w", err)
 		}
 	}
@@ -120,6 +146,12 @@ func Run(ctx context.Context, d Deps, cfg Config) (Report, error) {
 	samples, err := LoadLoCoMo(cfg.DataDir)
 	if err != nil {
 		return rep, err
+	}
+	if d.AnswerOptions.ContextPolicy == "neighbors-v1" {
+		d.LoCoMoIndex, err = newLoCoMoTurnIndex(samples)
+		if err != nil {
+			return rep, err
+		}
 	}
 	if cfg.Extract && d.Extractor != nil {
 		rep.Extract = d.Extractor.Model()
@@ -139,22 +171,22 @@ func Run(ctx context.Context, d Deps, cfg Config) (Report, error) {
 	}
 
 	locomo, err := scoreLoCoMo(ctx, d, samples, cfg.Limit, false, log)
+	rep.Sets = append(rep.Sets, locomo)
 	if err != nil {
 		return rep, err
 	}
-	rep.Sets = append(rep.Sets, locomo)
 	if cfg.Extract && d.Extractor != nil {
 		extracted, err := scoreLoCoMo(ctx, d, samples, cfg.Limit, true, log)
+		rep.Sets = append(rep.Sets, extracted)
 		if err != nil {
 			return rep, err
 		}
-		rep.Sets = append(rep.Sets, extracted)
 	}
 	lmeSet, err := scoreLME(ctx, d, lme, log)
+	rep.Sets = append(rep.Sets, lmeSet)
 	if err != nil {
 		return rep, err
 	}
-	rep.Sets = append(rep.Sets, lmeSet)
 	return rep, nil
 }
 
@@ -181,18 +213,39 @@ func extractLoCoMo(ctx context.Context, d Deps, samples []LoCoMoSample, log func
 				b.WriteString(t.Content)
 				b.WriteByte('\n')
 			}
-			res, err := extract.Extract(ctx, d.Extractor, extract.Source{Project: s.ID, Content: b.String()}, extract.Options{})
-			if err != nil {
-				return fmt.Errorf("extract %s session %s: %w", s.ID, sid, err)
+			var projection []ExtractionProjection
+			var key ExtractionKey
+			var hit bool
+			if d.ExtractCache != nil {
+				key = d.ExtractCache.Key(s.ID, sid, d.Extractor.Model(), b.String())
+				projection, hit, err = d.ExtractCache.Load(key)
+				if err != nil {
+					return fmt.Errorf("extract %s session %s cache: %w", s.ID, sid, err)
+				}
+			}
+			if !hit {
+				res, err := extract.Extract(ctx, d.Extractor, extract.Source{Project: s.ID, Content: b.String()}, extract.Options{})
+				if err != nil {
+					return fmt.Errorf("extract %s session %s: %w", s.ID, sid, err)
+				}
+				projection = make([]ExtractionProjection, len(res.Candidates))
+				for i, c := range res.Candidates {
+					projection[i] = ExtractionProjection{Content: c.Content, Type: c.Type, Confidence: c.Confidence}
+				}
+				if d.ExtractCache != nil {
+					if err := d.ExtractCache.Save(key, projection); err != nil {
+						return fmt.Errorf("extract %s session %s cache: %w", s.ID, sid, err)
+					}
+				}
 			}
 			when := turns[0].When
-			for _, c := range res.Candidates {
+			for _, c := range projection {
 				drafts = append(drafts, draft{
 					Content: c.Content, When: when, Type: c.Type, Confidence: c.Confidence,
 					Session: sid,
 				})
 			}
-			log("extracted %s session %s: %d memories", s.ID, sid, len(res.Candidates))
+			log("extracted %s session %s: %d memories", s.ID, sid, len(projection))
 		}
 		if err := ingest(ctx, d, scope, drafts); err != nil {
 			return err
@@ -247,10 +300,7 @@ samples:
 		}
 	}
 	rows, err := scoreQuestions(ctx, d, qs, true, log)
-	if err != nil {
-		return SetResult{}, err
-	}
-	return SetResult{Name: name, Rows: rows}, nil
+	return SetResult{Name: name, Rows: rows}, err
 }
 
 func scoreLME(ctx context.Context, d Deps, qs []LMEQuestion, log func(string, ...any)) (SetResult, error) {
@@ -271,10 +321,7 @@ func scoreLME(ctx context.Context, d Deps, qs []LMEQuestion, log func(string, ..
 		scored = append(scored, scoredQ{Question: q.Question, Scope: scope})
 	}
 	rows, err := scoreQuestions(ctx, d, scored, false, log)
-	if err != nil {
-		return SetResult{}, err
-	}
-	return SetResult{Name: fmt.Sprintf("LongMemEval_S subset (%d, stratified by type)", len(qs)), Rows: rows}, nil
+	return SetResult{Name: fmt.Sprintf("LongMemEval_S subset (%d, stratified by type)", len(qs)), Rows: rows}, err
 }
 
 type scoredQ struct {
@@ -334,9 +381,15 @@ func ingest(ctx context.Context, d Deps, scope string, drafts []draft) error {
 }
 
 func scoreQuestions(ctx context.Context, d Deps, qs []scoredQ, withF1 bool, log func(string, ...any)) ([]Row, error) {
+	if err := validateAnswerOptions(d.AnswerOptions, d.ScoreCache); err != nil {
+		return nil, err
+	}
 	type acc struct {
 		n, judge, errors, recallN int
 		f1, r5, r10               float64
+		contextRecall             float64
+		contextN                  int
+		hasContext                bool
 	}
 	by := map[string]*acc{}
 	var order []string
@@ -352,58 +405,149 @@ func scoreQuestions(ctx context.Context, d Deps, qs []scoredQ, withF1 bool, log 
 		Store: d.Store, Embedder: d.Embedder, Reranker: d.Reranker,
 		Options: retrieve.Options{RerankTimeout: 30 * time.Second},
 	}
+	if d.AnswerOptions.CaptureInputs {
+		ret.Logger = newBenchDiagnosticLogger(log)
+	}
 	var now time.Time
+	var stopErr error
 	ret.Options.Now = func() time.Time { return now }
 	for i, q := range qs {
+		opts := effectiveAnswerOptions(q, withF1, d.AnswerOptions)
 		now = q.When
 		if now.IsZero() {
 			now = time.Now()
 		}
-		hits, err := ret.Search(ctx, retrieve.Query{Text: q.Text, Scope: q.Scope, Limit: topK})
-		if err != nil {
-			return nil, fmt.Errorf("search %s: %w", q.ID, err)
-		}
-		contents := make([]string, len(hits))
-		var ids5, ids10 []string
-		for j, h := range hits {
-			contents[j] = h.Content
-			id := attrString(h.Memory, "bench_dia")
-			if id == "" {
-				id = attrString(h.Memory, "bench_session")
+		var state scoreState
+		if d.ScoreCache != nil {
+			key := d.ScoreCache.keyForOptions(q, withF1, d.Reader, d.Judge, opts)
+			var err error
+			state, _, err = d.ScoreCache.load(key)
+			if err != nil {
+				stopErr = err
+				break
 			}
-			ids10 = append(ids10, id)
-			if j < 5 {
-				ids5 = append(ids5, id)
+			if state.Phase == scoreReaderInFlight || state.Phase == scoreJudgeInFlight {
+				stopErr = d.ScoreCache.unknown(state.Phase)
+				break
 			}
 		}
-		answer, err := completeText(ctx, d.Reader, readerSystem, readerUser(q.Text, contents), readerTokens)
-		if err != nil {
-			add(q.Type).errors++
-			add("all").errors++
-			log("reader %s: %v", q.ID, err)
-			continue
+		if state.Reader == nil {
+			hits, err := ret.Search(ctx, retrieve.Query{Text: q.Text, Scope: q.Scope, Limit: topK})
+			if err != nil {
+				stopErr = fmt.Errorf("search %s: %w", q.ID, err)
+				break
+			}
+			contents := make([]string, len(hits))
+			var ids5, ids10 []string
+			for j, h := range hits {
+				contents[j] = h.Content
+				id := attrString(h.Memory, "bench_dia")
+				if id == "" {
+					id = attrString(h.Memory, "bench_session")
+				}
+				ids10 = append(ids10, id)
+				if j < 5 {
+					ids5 = append(ids5, id)
+				}
+			}
+			var answer string
+			contextIDs := ids10
+			if opts.ContextPolicy == "neighbors-v1" {
+				input, err := buildLoCoMoReaderContext(q.Scope, hits, d.LoCoMoIndex, 1, 20000)
+				if err != nil {
+					stopErr = err
+					break
+				}
+				contents, contextIDs = input.Contents, input.IDs
+			}
+			system, user, err := readerMessages(q.Question, contents, withF1, opts.ReaderPolicy)
+			if err != nil {
+				stopErr = err
+				break
+			}
+			if d.AnswerOptions.CaptureInputs {
+				state.Inputs = newScoreInputSnapshot(hits, contextIDs, system, user, opts)
+			}
+			if d.ScoreCache == nil {
+				answer, err = completeText(ctx, d.Reader, system, user, readerTokens, d.Budget)
+			} else {
+				answer, err = d.ScoreCache.complete(ctx, &state, scoreReaderInFlight, d.Reader, system, user, readerTokens, d.Budget)
+			}
+			if err != nil {
+				if d.ScoreCache != nil || errors.Is(err, ErrBudgetExceeded) || errors.Is(err, ErrBudgetUsageUnavailable) {
+					stopErr = err
+					break
+				}
+				add(q.Type).errors++
+				add("all").errors++
+				log("reader %s: %v", q.ID, err)
+				continue
+			}
+			metrics := scoreMetrics{Recall5: evidenceRecall(q.Evidence, ids5), Recall10: evidenceRecall(q.Evidence, ids10)}
+			if opts.ContextPolicy == "neighbors-v1" {
+				r := evidenceRecall(q.Evidence, contextIDs)
+				metrics.ContextRecall = &r
+			}
+			if withF1 {
+				metrics.F1 = TokenF1(answer, q.Answer, q.Type)
+			}
+			state.Reader = &scoreReader{Answer: answer, Metrics: metrics}
+			state.Phase = scoreReaderDone
+			if d.ScoreCache != nil {
+				if err := d.ScoreCache.save(state); err != nil {
+					stopErr = err
+					break
+				}
+			}
 		}
-		verdict, err := completeText(ctx, d.Judge, "", JudgePrompt(q.Question, answer), judgeTokens)
-		if err != nil {
-			add(q.Type).errors++
-			add("all").errors++
-			log("judge %s: %v", q.ID, err)
-			continue
+		if state.Judge == nil {
+			var verdict string
+			var err error
+			if d.ScoreCache == nil {
+				verdict, err = completeText(ctx, d.Judge, "", JudgePrompt(q.Question, state.Reader.Answer), judgeTokens, d.Budget)
+			} else {
+				verdict, err = d.ScoreCache.complete(ctx, &state, scoreJudgeInFlight, d.Judge, "", JudgePrompt(q.Question, state.Reader.Answer), judgeTokens, d.Budget)
+			}
+			if err != nil {
+				if d.ScoreCache != nil || errors.Is(err, ErrBudgetExceeded) || errors.Is(err, ErrBudgetUsageUnavailable) {
+					stopErr = err
+					break
+				}
+				add(q.Type).errors++
+				add("all").errors++
+				log("judge %s: %v", q.ID, err)
+				continue
+			}
+			state.Judge = &scoreJudge{Text: verdict, Yes: JudgeYes(verdict)}
+			state.Phase = scoreDone
+			if d.ScoreCache != nil {
+				if err := d.ScoreCache.save(state); err != nil {
+					stopErr = err
+					break
+				}
+			}
 		}
-		ok := JudgeYes(verdict)
+		// Fresh and replayed results share exactly the same accumulator path.
 		for _, label := range []string{q.Type, "all"} {
 			a := add(label)
 			a.n++
-			if ok {
+			if state.Judge.Yes {
 				a.judge++
 			}
 			if withF1 {
-				a.f1 += TokenF1(answer, q.Answer, q.Type)
+				a.f1 += state.Reader.Metrics.F1
 			}
-			if r := evidenceRecall(q.Evidence, ids5); r >= 0 {
+			if r := state.Reader.Metrics.Recall5; r >= 0 {
 				a.r5 += r
-				a.r10 += evidenceRecall(q.Evidence, ids10)
+				a.r10 += state.Reader.Metrics.Recall10
 				a.recallN++
+			}
+			if r := state.Reader.Metrics.ContextRecall; r != nil {
+				a.hasContext = true
+				if *r >= 0 {
+					a.contextRecall += *r
+					a.contextN++
+				}
 			}
 		}
 		if (i+1)%25 == 0 || i+1 == len(qs) {
@@ -426,9 +570,10 @@ func scoreQuestions(ctx context.Context, d Deps, qs []scoredQ, withF1 bool, log 
 		rows = append(rows, Row{
 			Label: show, N: a.n, F1: a.f1, HasF1: withF1, Judge: a.judge,
 			Recall5: a.r5, Recall10: a.r10, RecallN: a.recallN, Errors: a.errors,
+			ContextRecall: a.contextRecall, ContextN: a.contextN, HasContext: a.hasContext,
 		})
 	}
-	return rows, nil
+	return rows, stopErr
 }
 
 func labelRank(s string) string {
@@ -462,10 +607,17 @@ func attrString(m store.Memory, key string) string {
 	return fmt.Sprint(v)
 }
 
-func completeText(ctx context.Context, c *chat.Client, system, user string, maxTokens int) (string, error) {
+func completeText(ctx context.Context, c *chat.Client, system, user string, maxTokens int, budget *Budget) (string, error) {
 	var last error
 	for i := 0; i < 3; i++ {
-		text, _, err := c.Text(ctx, system, user, maxTokens)
+		reserved, err := budget.reserve(system, user, maxTokens)
+		if err != nil {
+			return "", err
+		}
+		text, usage, err := c.Text(ctx, system, user, maxTokens)
+		if costErr := budget.settle(reserved, usage); costErr != nil {
+			return "", costErr
+		}
 		if err == nil {
 			return strings.TrimSpace(text), nil
 		}
@@ -500,21 +652,33 @@ func (r Report) Markdown() string {
 	b.WriteByte('\n')
 	for _, s := range r.Sets {
 		fmt.Fprintf(&b, "## %s\n\n", s.Name)
-		if len(s.Rows) > 0 && s.Rows[0].HasF1 {
-			b.WriteString("| | n | F1 | judge | evidence recall@5 | evidence recall@10 | errors |\n|---|---:|---:|---:|---:|---:|---:|\n")
-		} else {
-			b.WriteString("| | n | judge | evidence recall@5 | evidence recall@10 | errors |\n|---|---:|---:|---:|---:|---:|\n")
+		showContext := false
+		for _, row := range s.Rows {
+			showContext = showContext || row.HasContext
 		}
+		header, separator := "| | n | judge | evidence recall@5 | evidence recall@10", "|---|---:|---:|---:|---:"
+		if len(s.Rows) > 0 && s.Rows[0].HasF1 {
+			header, separator = "| | n | F1 | judge | evidence recall@5 | evidence recall@10", "|---|---:|---:|---:|---:|---:"
+		}
+		if showContext {
+			header += " | reader context recall"
+			separator += "|---:"
+		}
+		b.WriteString(header + " | errors |\n" + separator + "|---:|\n")
 		for _, row := range s.Rows {
 			if row.HasF1 {
-				fmt.Fprintf(&b, "| %s | %d | %s | %s | %s | %s | %d |\n",
+				fmt.Fprintf(&b, "| %s | %d | %s | %s | %s | %s",
 					row.Label, row.N, meanStr(row.F1, row.N), pct(row.Judge, row.N),
-					meanStr(row.Recall5, row.RecallN), meanStr(row.Recall10, row.RecallN), row.Errors)
+					meanStr(row.Recall5, row.RecallN), meanStr(row.Recall10, row.RecallN))
 			} else {
-				fmt.Fprintf(&b, "| %s | %d | %s | %s | %s | %d |\n",
+				fmt.Fprintf(&b, "| %s | %d | %s | %s | %s",
 					row.Label, row.N, pct(row.Judge, row.N),
-					meanStr(row.Recall5, row.RecallN), meanStr(row.Recall10, row.RecallN), row.Errors)
+					meanStr(row.Recall5, row.RecallN), meanStr(row.Recall10, row.RecallN))
 			}
+			if showContext {
+				fmt.Fprintf(&b, " | %s", meanStr(row.ContextRecall, row.ContextN))
+			}
+			fmt.Fprintf(&b, " | %d |\n", row.Errors)
 		}
 		b.WriteByte('\n')
 	}

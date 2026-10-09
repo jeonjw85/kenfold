@@ -29,6 +29,23 @@ func TestDates(t *testing.T) {
 	}
 }
 
+func TestLoCoMoReleasedCategoryLabels(t *testing.T) {
+	// Released dataset IDs differ from the numbered list in the paper.
+	// See snap-research/locomo task_eval/evaluation.py and issues/6.
+	for _, tc := range []struct{ id, label string }{
+		{"1", "1 multi-hop"},
+		{"2", "2 temporal"},
+		{"3", "3 open-domain"},
+		{"4", "4 single-hop"},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			if got := LoCoMoCategory(tc.id); got != tc.label {
+				t.Fatalf("released category %s mislabeled: %q, want %q", tc.id, got, tc.label)
+			}
+		})
+	}
+}
+
 func TestTokenF1(t *testing.T) {
 	if f1Score("The cats!", "cats") != 1 {
 		t.Fatalf("articles and punct: %v", f1Score("The cats!", "cats"))

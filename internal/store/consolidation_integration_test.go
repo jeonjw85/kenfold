@@ -180,7 +180,10 @@ func TestConsolidationStoreIntegration(t *testing.T) {
 	for i := range 7 {
 		sessions = append(sessions, mk(memory.TypeEpisodic, dscope, "Session summary "+strconv.Itoa(i)+": worked on the importer.", nil))
 	}
-	cutoff := time.Now()
+	var cutoff time.Time
+	if err := pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&cutoff); err != nil {
+		t.Fatal(err)
+	}
 	groups, err := s.DigestGroups(ctx, DigestParams{Before: cutoff, Min: 6, Max: 5})
 	if err != nil || len(groups) != 1 || groups[0].Scope != dscope || len(groups[0].Sessions) != 5 || groups[0].Sessions[0].ID != sessions[0].ID {
 		t.Fatalf("digest groups = %+v, %v", groups, err)
