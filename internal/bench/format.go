@@ -56,13 +56,13 @@ func clipBytes(s string, n int) string {
 func LoCoMoCategory(n string) string {
 	switch n {
 	case "1":
-		return "1 single-hop"
+		return "1 multi-hop"
 	case "2":
-		return "2 multi-hop"
+		return "2 temporal"
 	case "3":
-		return "3 temporal"
+		return "3 open-domain"
 	case "4":
-		return "4 open-domain"
+		return "4 single-hop"
 	default:
 		return n
 	}

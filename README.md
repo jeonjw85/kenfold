@@ -20,7 +20,7 @@ The main design choices (see [ADR-0001](docs/adr/0001-architecture.md)):
 - **Handoff** between agents: stop in Claude Code, resume in Codex
 - **Poisoning-aware**: memory is served as data, never as instructions; preferences need your approval
 
-> **Status: Phase 5 in progress.** Shared storage, hybrid search, session hooks, memory extraction, code references, and OAuth remote access are implemented. Phase 5 adds export/import, a review dashboard, and consolidation. The LoCoMo and LongMemEval benchmark harness is ready (`make bench`); results are still pending.
+> **Status: Phase 5 features implemented; public benchmark validation incomplete.** Shared storage, hybrid search, session hooks, memory extraction, code references, OAuth remote access, export/import, a review dashboard, and consolidation are implemented. The latest authorized attempt preserved partial raw-LoCoMo results for 1,402/1,540 questions, then stopped on unknown API usage. Extracted-LoCoMo and LongMemEval QA were not scored; no complete benchmark result is claimed. See the [qualified partial results and accounting](internal/bench/testdata/RESULTS.md).
 
 ## Quickstart
 
@@ -353,6 +353,50 @@ before `make check` to include integration tests. Tests truncate its data and ru
 packages sequentially. The GitHub Actions workflow runs these checks with its own
 database and builds the production container on every push and pull request.
 
+Public benchmarks can incur external API charges. Set `KENFOLD_BENCH_BUDGET_USD`,
+`KENFOLD_BENCH_INPUT_USD_PER_M`, and `KENFOLD_BENCH_OUTPUT_USD_PER_M` to enforce a
+reader/judge budget, with `KENFOLD_BENCH_REASONING=none`. Prices must cover both
+models and their applicable context tiers; cache discounts are ignored. Missing
+usage stops further calls, and an unfinished evaluation saves a report marked
+`PARTIAL` and fails. The budget is **per run** by default: keep safety headroom and
+account for earlier runs yourself. Select API-compatible models with
+`make bench BENCH_READER=<model> BENCH_JUDGE=<model>`.
+
+Completed dataset results are written as `PARTIAL` before reporting a benchmark
+run error. Per-question persistence is opt-in: set `KENFOLD_BENCH_SCORE_CACHE` to
+an owner-only directory and `KENFOLD_BENCH_SCORE_ID` to a pinned run identity.
+Answers, judge responses/decisions, F1, and evidence recall are saved before the
+next question. On restart, reuse the same directory and identity: completed
+questions replay without retrieval or reader/judge calls, and a saved reader
+answer resumes at the judge. Uncertain in-flight calls or persistence failures
+stop automatic retries. The directory is exclusively locked for the run.
+
+The score identity must pin dataset bytes, input/extracted memories, scoring and
+retrieval code/options, and all model weights/settings; names alone do not prove
+compatibility. Changed identity, question, model, or prompt is rejected rather
+than overwriting old results. Without this option, per-question scores remain
+in memory. Startup health checks and ingestion still run on restart; the zero-call
+guarantee applies to completed questions, not the whole harness.
+
+The [free recovery checks](internal/bench/testdata/RESULTS.md#free-recovery-verification--no-quality-scores)
+passed on all 60 selected LongMemEval haystacks, with no reader/judge calls, and
+on forced process-kill/reopen fixtures. These are operational checks, not QA
+scores; public benchmark validation remains incomplete.
+
+For durable accounting, set `KENFOLD_BENCH_USAGE_FILE` and explicitly initialize a
+new file with `KENFOLD_BENCH_USAGE_CREATE=1` **once**. Leave creation disabled on
+restarts to reuse the same allowance and prices. Existing journals cannot be
+overwritten; missing, corrupt, incompatible, or uncertain in-flight usage stops
+further calls. Accounting alone does not save QA results: retain both the score
+cache and the unchanged budget journal when resuming. Never reset an allowance
+to retry an uncertain call.
+
+`KENFOLD_BENCH_EXTRACT_CACHE` checkpoints successful LoCoMo extraction sessions,
+including empty results, independently of the disposable database. Supply
+`KENFOLD_BENCH_EXTRACT_ID` identifying the exact weights, extraction code/schema
+and inference settings; change it when any of those change. Cached benchmark
+projections are replayed through normal ingestion, without retuning extraction.
+
 Layout:
 
 ```
@@ -392,4 +436,4 @@ docs/                 ADRs and specs
 | **2b** ✅ | Model-based extraction of memories from sessions (reviewed), type classification |
 | **3** ✅ | Rerank, graph expansion, recency and staleness in ranking, code references with commit-based invalidation (tree-sitter symbols), REST API |
 | **4** ✅ | OAuth 2.1 authorization server (client metadata documents, dynamic registration, `private_key_jwt`, read-only grants), remote deployment behind a tunnel or proxy; verified end to end with the MCP SDK's OAuth client over HTTPS, not yet from ChatGPT itself. Object storage and an OpenAI-compatible proxy were deferred ([ADR-0003](docs/adr/0003-remote-access-and-oauth.md)) |
-| 5 | Export/import ✅, review dashboard ✅, consolidation ✅ ([ADR-0004](docs/adr/0004-consolidation.md)); public benchmarks (LongMemEval, LoCoMo): harness in `internal/bench` (`make bench`), results when run |
+| 5 | Export/import ✅, review dashboard ✅, consolidation ✅ ([ADR-0004](docs/adr/0004-consolidation.md)); public benchmarks (LongMemEval, LoCoMo): validation incomplete, [partial results and accounting](internal/bench/testdata/RESULTS.md) |
