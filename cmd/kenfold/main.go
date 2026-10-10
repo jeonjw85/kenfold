@@ -19,10 +19,13 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/kenfold/kenfold/internal/buildinfo"
 	"github.com/kenfold/kenfold/internal/config"
+	"github.com/kenfold/kenfold/internal/update"
 )
 
 const usage = `Kenfold: one memory for all your AI agents.
@@ -109,6 +112,7 @@ Environment:
   KENFOLD_CLASSIFY             classify memories stored without a type (default: on with a chat model)
   KENFOLD_CONSOLIDATE          propose to retire duplicates and digest old sessions (default: on with a chat model)
   KENFOLD_LOG_LEVEL            debug|info|warn|error      (default info)
+  KENFOLD_UPDATE_CHECK         report a newer GitHub release (default true; does not download or restart)
 
 Hook and refs sync environment:
   KENFOLD_URL                  MCP endpoint               (default http://127.0.0.1:7077/mcp)
@@ -145,6 +149,28 @@ type cli struct {
 	errOut io.Writer // diagnostics (stderr)
 }
 
+func updateEnabled(getenv func(string) string) bool {
+	v := strings.TrimSpace(getenv("KENFOLD_UPDATE_CHECK"))
+	if v == "" {
+		return true
+	}
+	b, err := strconv.ParseBool(v)
+	return err == nil && b
+}
+
+func updateLine(ctx context.Context, getenv func(string) string) string {
+	if !updateEnabled(getenv) || !update.IsRelease(buildinfo.Version) {
+		return ""
+	}
+	cctx, cancel := context.WithTimeout(ctx, update.Timeout)
+	defer cancel()
+	rel, err := update.Check(cctx, nil, update.Endpoint, buildinfo.Version)
+	if err != nil || rel.Version == "" {
+		return ""
+	}
+	return fmt.Sprintf("update available: %s (git pull && make up)\n", rel.Version)
+}
+
 func run(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
@@ -155,6 +181,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdin i
 	switch cmd {
 	case "version", "--version", "-v":
 		fmt.Fprintf(stdout, "kenfold %s (commit %s, built %s)\n", buildinfo.Version, buildinfo.Commit, buildinfo.Date)
+		if line := updateLine(ctx, getenv); line != "" {
+			fmt.Fprint(stdout, line)
+		}
 		return nil
 	case "help", "--help", "-h":
 		fmt.Fprint(stdout, usage)

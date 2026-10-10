@@ -73,6 +73,8 @@ type Deps struct {
 	Consolidation Consolidation
 	Logger        *slog.Logger
 	Version       string
+	// Update, if set, returns a newer release to show in the footer.
+	Update func() (version, url string)
 	// Remote also serves the dashboard on PublicHost (KENFOLD_DASHBOARD=remote).
 	Remote     bool
 	PublicHost string

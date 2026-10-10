@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +18,9 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/kenfold/kenfold/internal/buildinfo"
+	"github.com/kenfold/kenfold/internal/update"
 )
 
 // unreachableDB points at a closed port so tests never touch a real database.
@@ -143,6 +149,29 @@ func TestCLIVersionAndHelp(t *testing.T) {
 		if err != nil || !strings.Contains(out, want) {
 			t.Errorf("help missing %q (err %v)", want, err)
 		}
+	}
+}
+
+func TestVersionReportsUpdate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"tag_name":"v0.1.1"}`)
+	}))
+	defer srv.Close()
+	oldEndpoint, oldVersion := update.Endpoint, buildinfo.Version
+	update.Endpoint = srv.URL
+	buildinfo.Version = "v0.1.0"
+	t.Cleanup(func() {
+		update.Endpoint = oldEndpoint
+		buildinfo.Version = oldVersion
+	})
+
+	out, _, err := runCLI(t, nil, "version")
+	if err != nil || !strings.Contains(out, "kenfold v0.1.0") || !strings.Contains(out, "update available: v0.1.1 (git pull && make up)") {
+		t.Fatalf("version = %q, %v", out, err)
+	}
+	out, _, err = runCLI(t, map[string]string{"KENFOLD_UPDATE_CHECK": "false"}, "version")
+	if err != nil || strings.Contains(out, "update available") {
+		t.Fatalf("check disabled: %q, %v", out, err)
 	}
 }
 

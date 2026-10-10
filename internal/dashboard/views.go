@@ -46,17 +46,19 @@ type Consolidation interface {
 
 // view is what every page template receives.
 type view struct {
-	Title    string
-	Nav      string
-	Flash    string
-	Error    string
-	CSRF     string
-	Path     string
-	Version  string
-	LoggedIn bool
-	Pending  int
-	Consol   bool // consolidation is enabled
-	Data     any
+	Title     string
+	Nav       string
+	Flash     string
+	Error     string
+	CSRF      string
+	Path      string
+	Version   string
+	Update    string
+	UpdateURL string
+	LoggedIn  bool
+	Pending   int
+	Consol    bool // consolidation is enabled
+	Data      any
 }
 
 var funcs = template.FuncMap{
@@ -144,6 +146,9 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, status int, page
 		v.Pending = s.pendingCount(r.Context())
 	}
 	v.Version, v.Path, v.Consol = s.d.Version, r.URL.RequestURI(), s.d.Consolidation != nil
+	if s.d.Update != nil {
+		v.Update, v.UpdateURL = s.d.Update()
+	}
 	var buf bytes.Buffer
 	if err := t.ExecuteTemplate(&buf, "layout", v); err != nil {
 		s.log.ErrorContext(r.Context(), "dashboard template failed", "page", page, "err", err)

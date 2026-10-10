@@ -76,6 +76,25 @@ func TestPagesRender(t *testing.T) {
 	}
 }
 
+func TestFooterUpdateLink(t *testing.T) {
+	pages, err := parsePages()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b bytes.Buffer
+	err = pages["message.html"].ExecuteTemplate(&b, "layout", view{
+		Version: "v0.1.0", Update: "v0.1.1", UpdateURL: "https://github.com/jeonjw85/kenfold/releases/tag/v0.1.1",
+	})
+	out := b.String()
+	if err != nil || !strings.Contains(out, `href="https://github.com/jeonjw85/kenfold/releases/tag/v0.1.1"`) || !strings.Contains(out, "v0.1.1 is available") {
+		t.Fatalf("footer = %q, %v", out, err)
+	}
+	b.Reset()
+	if err := pages["message.html"].ExecuteTemplate(&b, "layout", view{Version: "v0.1.0"}); err != nil || strings.Contains(b.String(), "is available") {
+		t.Fatalf("update link without a release: %q, %v", b.String(), err)
+	}
+}
+
 func TestSafeBack(t *testing.T) {
 	for in, want := range map[string]string{
 		"/dashboard/review?page=2":        "/dashboard/review?page=2",

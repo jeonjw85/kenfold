@@ -86,6 +86,9 @@ type Config struct {
 	// host names only, default), DashboardRemote (also the public URL's
 	// host), or DashboardOff.
 	Dashboard string
+
+	// UpdateCheck reports a newer GitHub release. It does not download or restart.
+	UpdateCheck bool
 }
 
 // Dashboard modes.
@@ -268,6 +271,15 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("KENFOLD_OAUTH needs KENFOLD_AUTH=apikey")
 	}
 	c.OAuthDCR = c.OAuthDCR && c.OAuth
+
+	c.UpdateCheck = true
+	if v := strings.TrimSpace(getenv("KENFOLD_UPDATE_CHECK")); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("KENFOLD_UPDATE_CHECK: %q is not a boolean", v)
+		}
+		c.UpdateCheck = b
+	}
 
 	c.Dashboard = strings.ToLower(envOr(getenv, "KENFOLD_DASHBOARD", DashboardLocal))
 	switch c.Dashboard {

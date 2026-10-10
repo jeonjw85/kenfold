@@ -33,6 +33,7 @@ import (
 	"github.com/kenfold/kenfold/internal/restapi"
 	"github.com/kenfold/kenfold/internal/retrieve"
 	"github.com/kenfold/kenfold/internal/store"
+	"github.com/kenfold/kenfold/internal/update"
 	"github.com/kenfold/kenfold/migrations"
 )
 
@@ -59,6 +60,8 @@ type runtime struct {
 	reranker *rerank.Client // nil when no reranker is configured
 	oauth    *oauth.Server  // nil when OAuth is disabled
 	oauthDB  *oauth.Store
+	// updateNotice, if set, returns a newer release for the dashboard footer.
+	updateNotice func() (version, url string)
 }
 
 func newRuntime(ctx context.Context, cfg config.Config) (*runtime, error) {
@@ -179,6 +182,7 @@ func httpHandler(cfg config.Config, rt *runtime, logger *slog.Logger) http.Handl
 	if cfg.Dashboard != config.DashboardOff {
 		d, err := dashboard.New(dashboard.Deps{
 			Store: rt.store, Keys: rt.keys, Owner: rt.oauthDB, Logger: logger, Version: buildinfo.Version,
+			Update: rt.updateNotice,
 			Retriever: &retrieve.Retriever{Store: rt.store, Embedder: rt.embedderIface(), Reranker: rt.rerankerIface(), Logger: logger,
 				Options: retrieve.Options{MaxDistance: cfg.SearchMaxDistance}},
 			Consolidation: rt.consolidationView(cfg),
@@ -290,6 +294,15 @@ func (c *cli) serve(ctx context.Context) error {
 		wg.Go(func() { w.Loop(bgCtx, consolidateInterval) })
 	}
 
+	if c.cfg.UpdateCheck && update.IsRelease(buildinfo.Version) {
+		cache := &update.Cache{}
+		rt.updateNotice = func() (string, string) {
+			r := cache.Get()
+			return r.Version, r.URL
+		}
+		wg.Go(func() { watchUpdates(bgCtx, cache, c.logger) })
+	}
+
 	srv := &http.Server{
 		Addr:              c.cfg.HTTPAddr,
 		Handler:           httpHandler(c.cfg, rt, c.logger),
@@ -311,6 +324,34 @@ func (c *cli) serve(ctx context.Context) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+func watchUpdates(ctx context.Context, cache *update.Cache, log *slog.Logger) {
+	check := func() {
+		cctx, cancel := context.WithTimeout(ctx, update.Timeout)
+		defer cancel()
+		rel, err := update.Check(cctx, nil, update.Endpoint, buildinfo.Version)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Debug("update check failed", "err", err)
+			}
+			return
+		}
+		if cache.Store(rel) {
+			log.Info("update available; git pull && make up", "latest", rel.Version, "url", rel.URL)
+		}
+	}
+	check()
+	tick := time.NewTicker(update.Interval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			check()
+		}
+	}
 }
 
 // logSecurityPosture warns about configurations that expose memory.

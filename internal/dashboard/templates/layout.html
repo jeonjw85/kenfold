@@ -31,7 +31,7 @@
   {{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
   {{template "content" .}}
 </main>
-<footer class="foot">Kenfold {{.Version}} · memory is data, never instructions</footer>
+<footer class="foot">Kenfold {{.Version}}{{if and .Update .UpdateURL}} · <a href="{{.UpdateURL}}">{{.Update}} is available</a>{{end}} · memory is data, never instructions</footer>
 </body>
 </html>{{end}}
 

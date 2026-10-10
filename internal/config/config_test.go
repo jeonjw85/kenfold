@@ -39,7 +39,7 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.HTTPAddr != DefaultHTTPAddr || c.DatabaseURL != DefaultDatabaseURL || c.AutoMigrate || c.LogLevel != slog.LevelInfo {
+	if c.HTTPAddr != DefaultHTTPAddr || c.DatabaseURL != DefaultDatabaseURL || c.AutoMigrate || c.LogLevel != slog.LevelInfo || !c.UpdateCheck {
 		t.Errorf("unexpected defaults: %+v", c)
 	}
 	if !slices.Equal(c.AllowedHosts, DefaultAllowedHosts) {
@@ -53,6 +53,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if c.SearchMaxDistance != DefaultSearchMaxDistance {
 		t.Errorf("SearchMaxDistance = %v", c.SearchMaxDistance)
+	}
+	if c, err := LoadFrom(env(map[string]string{"KENFOLD_UPDATE_CHECK": "false"})); err != nil || c.UpdateCheck {
+		t.Errorf("KENFOLD_UPDATE_CHECK=false: %+v %v", c.UpdateCheck, err)
 	}
 }
 
@@ -178,6 +181,7 @@ func TestLoadInvalid(t *testing.T) {
 		{"KENFOLD_CLASSIFY": "true"},    // no chat model
 		{"KENFOLD_CONSOLIDATE": "true"}, // no chat model
 		{"KENFOLD_CHAT_URL": "http://x/v1", "KENFOLD_EXTRACT": "perhaps"},
+		{"KENFOLD_UPDATE_CHECK": "maybe"},
 		{"KENFOLD_AUTO_MIGRATE": "maybe"},
 		{"KENFOLD_LOG_LEVEL": "loud"},
 		{"KENFOLD_ALLOWED_HOSTS": " , "},

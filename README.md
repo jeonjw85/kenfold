@@ -4,6 +4,7 @@
 [![Go 1.27+](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go&logoColor=white)](go.mod)
 [![PostgreSQL 18 + pgvector](https://img.shields.io/badge/PostgreSQL-18%20%2B%20pgvector-4169E1?logo=postgresql&logoColor=white)](compose.yaml)
 [![MCP server](https://img.shields.io/badge/MCP-server-111111)](https://modelcontextprotocol.io)
+[![MIT license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 **One memory for all your AI agents.** Bring every agent into the fold.
 
@@ -44,6 +45,14 @@ make up-embed                  # adds Ollama with bge-m3 and a llama.cpp reranke
 ```
 
 Memories written without embeddings are embedded automatically once a model is available. The reranker reads the query and each candidate memory together; on the internal eval set it raised recall@5 from 0.90 to 0.96 (see [Search quality](#search-quality)), at the cost of 1–2 seconds per search on CPU. `make up-embed RERANK=0` leaves it out.
+
+## Upgrading
+
+```sh
+git pull && make up
+```
+
+A release build checks GitHub for a newer version and shows it in the dashboard footer and in `kenfold version`. It does not download or restart. `KENFOLD_UPDATE_CHECK=false` turns the check off.
 
 ## Connect your agents
 
@@ -334,6 +343,7 @@ kenfold version
 | `KENFOLD_CLASSIFY` | on when a chat model is configured; types memories stored without one |
 | `KENFOLD_CONSOLIDATE` | on when a chat model is configured; proposes to retire duplicates and contradicted memories and to digest old sessions |
 | `KENFOLD_LOG_LEVEL` | `info` |
+| `KENFOLD_UPDATE_CHECK` | `true`. A release build checks GitHub for a newer version and reports it. It does not download or restart |
 
 The hook and `kenfold refs sync` read `KENFOLD_URL` (default `http://127.0.0.1:7077/mcp`; the REST API is at `/api/v1` next to it) and `KENFOLD_API_KEY` (unless `--key-file` is given); the hook also reads `KENFOLD_STATE_DIR` (default `~/.local/state/kenfold`).
 
