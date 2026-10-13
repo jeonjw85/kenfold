@@ -1,5 +1,7 @@
 # Remote access
 
+[English](deploy.md) | [한국어](ko/deploy.md)
+
 By default Kenfold listens on `127.0.0.1` only, which is enough for agents on the same machine. Clients that run elsewhere need a public HTTPS URL:
 
 - ChatGPT and claude.ai (web and mobile) run in their providers' clouds.

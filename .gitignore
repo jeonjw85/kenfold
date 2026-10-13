@@ -1,6 +1,14 @@
 /bin/
 /dist/
 .env
+.env.*
+!.env.example
 *.test
 *.out
 .DS_Store
+
+# Local agent instructions and working notes, not public documentation.
+AGENTS.md
+CLAUDE.md
+/.omo/
+/docs/superpowers/

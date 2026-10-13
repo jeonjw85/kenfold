@@ -6,4 +6,10 @@ dist
 !README.md
 compose.yaml
 Makefile
-.env
+**/.env
+**/.env.*
+!**/.env.example
+**/AGENTS.md
+**/CLAUDE.md
+.omo
+docs/superpowers

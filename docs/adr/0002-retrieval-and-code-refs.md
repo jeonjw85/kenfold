@@ -83,5 +83,5 @@ Symbols in unsupported languages are skipped rather than guessed; their files ar
 - `make up-embed` now downloads about 1.9 GB and runs two model servers. Search latency with the reranker is 1–2 s on CPU, versus about 25 ms without it.
 - Staleness is only as fresh as the last sync. Code changed on a machine that never runs the hook or `refs sync` is not noticed.
 - References to code in other repositories, generated code, or unsupported languages stay `unresolved` or file-level.
-- The REST API is the first non-MCP surface. It shares the MCP endpoint's protections and API keys, and is where a future dashboard will attach.
+- The REST API is the first non-MCP surface. It shares the MCP endpoint's protections and API keys. The Phase 5 dashboard runs in the same process, accesses storage directly, and authenticates the owner by password rather than using this API (see [ADR-0001](0001-architecture.md#security-posture)).
 - The eval corpus is part of the repository. Changes to ranking should be measured with `make eval-search` before and after.

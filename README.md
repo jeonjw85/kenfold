@@ -1,5 +1,7 @@
 # Kenfold
 
+[English](README.md) | [한국어](README.ko.md)
+
 [![Release checks](https://github.com/jeonjw85/kenfold/actions/workflows/ci.yaml/badge.svg)](https://github.com/jeonjw85/kenfold/actions/workflows/ci.yaml)
 [![Go 1.27+](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go&logoColor=white)](go.mod)
 [![PostgreSQL 18 + pgvector](https://img.shields.io/badge/PostgreSQL-18%20%2B%20pgvector-4169E1?logo=postgresql&logoColor=white)](compose.yaml)
@@ -26,7 +28,7 @@ The main design choices (see [ADR-0001](docs/adr/0001-architecture.md)):
 - **Handoff** between agents: stop in Claude Code, resume in Codex
 - **Poisoning-aware**: memory is served as data, never as instructions; preferences need your approval
 
-> **Status: Phase 5 features implemented; public benchmark validation incomplete.** Shared storage, hybrid search, session hooks, memory extraction, code references, OAuth remote access, export/import, a review dashboard, and consolidation are implemented. The latest authorized attempt preserved partial raw-LoCoMo results for 1,402/1,540 questions, then stopped on unknown API usage. Extracted-LoCoMo and LongMemEval QA were not scored; no complete benchmark result is claimed. See the [qualified partial results and accounting](internal/bench/testdata/RESULTS.md).
+> **Status: Phase 5 features implemented; public benchmark validation incomplete.** Shared storage, hybrid search, session hooks, memory extraction, code references, OAuth remote access, export/import, a review dashboard, and consolidation are implemented. The latest scored run preserved partial raw-LoCoMo results for 1,402/1,540 questions, then stopped on unknown API usage. Extracted-LoCoMo and LongMemEval QA were not scored; no complete benchmark result is claimed. See the [qualified partial results and accounting](internal/bench/testdata/RESULTS.md).
 
 ## Quickstart
 

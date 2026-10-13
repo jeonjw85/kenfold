@@ -1,8 +1,8 @@
 # Public benchmarks — PARTIAL / incomplete validation
 
-## Latest authorized scored retry — partial raw-LoCoMo results
+## Latest scored run — partial raw-LoCoMo results
 
-The authorized retry ended at **2026-10-08T00:59:29Z**, exit status **1**.
+The run ended at **2026-10-08T00:59:29Z**, exit status **1**.
 Unlike the earlier attempt below, its completed answers, judge verdicts, F1 and
 evidence recall were preserved per question and independently verified.
 **Full public benchmark validation remains incomplete.** These are results for
@@ -36,7 +36,7 @@ unfinished judge call is excluded from every quality denominator.
 The next question, `conv-50-20`, has a saved reader answer but a
 `judge-in-flight` checkpoint with no saved verdict. The API usage could not be
 confirmed, so the durable budget latched `usage_unavailable` and stopped further
-calls. **The $5 allowance was not exhausted.** The retained evidence does not
+calls. **The run stopped on unknown usage, not budget exhaustion.** The retained evidence does not
 establish whether the underlying cause was transport failure or a response
 without valid usage; it must not be reported as a specific vendor/network error.
 
@@ -67,19 +67,11 @@ Ingestion completion is not an extraction-quality measurement.
   The journal stop and in-flight checkpoint prohibit blind automatic retries.
 - Known token-price estimates across all accounted attempts total
   **$5.95782375**, excluding uncertain usage. These are estimates, not invoices.
-  The original **$4.50** allocation envelopes and the new **$5.00** envelope remain
-  retained: **$9.50** conservatively allocated within the explicitly approved
-  **$10** cumulative cap. No unused allowance was released or reset.
-- No new paid retry or commit/push followed completion. The dedicated Ollama was
-  stopped but its container/model volume retained. Both evaluation databases
-  remain preserved; the original database still has 7,185 memories. The new
-  5,931-memory database was privately backed up and its archive listing checked;
-  a full restore was not tested.
 
 Score identity:
 `5db137baee808d72a5fe4fa2b1c1f1e0e48f8c7f16e82c5acf148887f9a98841`.
-Logs, individual answers/verdicts, journals, input manifests and backups remain
-private with the task. The earlier outcome below is historical, not a claim that
+Logs, individual answers/verdicts, usage journals and input manifests are not
+included in this repository. The earlier outcome below is historical, not a claim that
 this retry recovered the earlier run's lost scores.
 
 ## Earlier unsuccessful attempt — historical record
@@ -100,7 +92,7 @@ through local Ollama. No LongMemEval questions were answered or judged.
 The configured embedding client deadline was three minutes; the request ended
 with `Client.Timeout exceeded while awaiting headers`.
 
-## Why no quality scores are published
+## Why the earlier attempt has no quality scores
 
 The harness kept completed LoCoMo score aggregates in memory. Its non-budget
 error branch called `t.Fatal` before logging or writing the report, so the later
@@ -112,7 +104,8 @@ is not a substitute for public benchmark validation.
 The report error path has since been corrected and regression-tested with local
 fixtures: completed dataset results are written with a `PARTIAL` note before
 the harness reports failure. This report-only fix does **not** recover the lost
-scores or itself add per-question scoring checkpoints. No paid rerun was performed.
+scores or itself add per-question scoring checkpoints. The later run above used
+per-question checkpoints; it did not recover the earlier run's lost scores.
 
 ## Configuration and recovery caveats
 
@@ -129,27 +122,24 @@ scores or itself add per-question scoring checkpoints. No paid rerun was perform
 ## Accounting
 
 The continuation settled 6,161 health/reader/judge calls, with 2,885,543 input and
-24,422 output tokens. Its uncached token-price upper estimate is **$3.667984**,
-below its **$3.84** ceiling. The durable journal has no pending calls or reserved
+24,422 output tokens. Its uncached token-price upper estimate is **$3.667984**.
+The durable journal has no pending calls or reserved
 in-flight amount. This is an estimate, not a provider invoice.
 
 Known token-price estimates across accounted runs total **$3.683140**. Earlier
 interrupted usage is still retained conservatively: $0.25 for the original
 smoke and a $0.15 health-call upper bound inside the prior main-retry envelope.
-The unchanged conservative allocation envelopes total **$4.50**, below the
-user's **$5** limit. After this failure, no allowance was reset or released and
-no new paid retry was allocated.
 
 Completion: `2026-10-07T08:12:09Z`, exit status `1`.
 
-Evidence retained privately with the task:
+Checksums of historical artifacts (not included in this repository):
 
 - Final log SHA-256: `c0cf01f629aaf752076559bad3a2a3247435cc80ce1b58646740b89c4e6d95db`
 - Usage journal SHA-256: `645faa1f65f0f81dad888adabdbde294019966dff59a11e7e77b75706f4b4025`
 
 This outcome report is not a successful benchmark result or a comparison with
-other systems. A future measurement needs explicit authorization and durable
-score preservation; this attempt cannot establish memory or answer quality.
+other systems. A future measurement needs durable score preservation; this
+attempt cannot establish memory or answer quality.
 
 ## Free recovery verification — no quality scores
 
@@ -163,7 +153,7 @@ the same local embedding weights, and the unchanged three-minute client deadline
 - The formerly failing input `15745da0_abs` completed all nine batches (278 vectors).
 - The longest batch took **54.332 seconds**; the full check took about **5 h 10 m**.
 - There were **zero reader/judge or database calls**, no new external API charges,
-  and no new paid retry or budget reset.
+  and no new QA measurement.
 
 Separately, optional per-question score checkpoints were implemented and tested
 with free local HTTP fixtures and a separate disposable database. Real subprocess

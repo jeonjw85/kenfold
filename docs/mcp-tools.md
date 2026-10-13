@@ -1,5 +1,7 @@
 # Kenfold MCP tools
 
+[English](mcp-tools.md) | [한국어](ko/mcp-tools.md)
+
 Contract for the tools Kenfold exposes over MCP. Schemas are generated from the Go types in [`internal/mcpserver/server.go`](../internal/mcpserver/server.go); that file is the source of truth, and this document explains intent and semantics.
 
 ## Conventions

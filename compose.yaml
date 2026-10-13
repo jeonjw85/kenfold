@@ -72,6 +72,7 @@ services:
       KENFOLD_OAUTH_DCR: ${KENFOLD_OAUTH_DCR:-}
       KENFOLD_DASHBOARD: ${KENFOLD_DASHBOARD:-local}
       KENFOLD_LOG_LEVEL: ${KENFOLD_LOG_LEVEL:-info}
+      KENFOLD_UPDATE_CHECK: ${KENFOLD_UPDATE_CHECK:-true}
     ports:
       - "127.0.0.1:7077:7077"
     extra_hosts:
