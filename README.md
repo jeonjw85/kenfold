@@ -1,6 +1,6 @@
 # Kenfold
 
-[English](README.md) | [한국어](README.ko.md)
+[English](README.md) | [Korean](README.ko.md)
 
 [![Release checks](https://github.com/jeonjw85/kenfold/actions/workflows/ci.yaml/badge.svg)](https://github.com/jeonjw85/kenfold/actions/workflows/ci.yaml)
 [![Go 1.27+](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go&logoColor=white)](go.mod)
@@ -81,15 +81,15 @@ For the desktop app or IDE extension, which may not see your shell environment, 
 
 ```json
 {
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "kenfold": {
-      "type": "remote",
-      "url": "http://127.0.0.1:7077/mcp",
-      "oauth": false,
-      "headers": { "Authorization": "Bearer {env:KENFOLD_OPENCODE_KEY}" }
+    "$schema": "https://opencode.ai/config.json",
+    "mcp": {
+        "kenfold": {
+            "type": "remote",
+            "url": "http://127.0.0.1:7077/mcp",
+            "oauth": false,
+            "headers": { "Authorization": "Bearer {env:KENFOLD_OPENCODE_KEY}" }
+        }
     }
-  }
 }
 ```
 
@@ -239,12 +239,12 @@ An archive holds memories with their history, provenance, and timestamps, plus t
 
 Measured with `make eval-search` on an internal corpus of 110 memories in three projects and 67 queries in Korean and English (details in [internal/retrieve/testdata/RESULTS.md](internal/retrieve/testdata/RESULTS.md)). Recall@5 is the share of the memories that answer a query found in the top 5.
 
-| Setup | Dev (43 queries) | Holdout (24) | Time per search |
-|---|---|---|---|
-| `make up` (full-text) | 0.65 | 0.44 | a few ms |
-| Phase 2 hybrid search | 0.85 | 0.88 | ~25 ms |
-| `make up-embed RERANK=0` | 0.90 | 0.90 | ~25 ms |
-| `make up-embed` (with reranker) | **0.96** | **0.96** | ~1.8 s |
+| Setup                           | Dev (43 queries) | Holdout (24) | Time per search |
+| ------------------------------- | ---------------- | ------------ | --------------- |
+| `make up` (full-text)           | 0.65             | 0.44         | a few ms        |
+| Phase 2 hybrid search           | 0.85             | 0.88         | ~25 ms          |
+| `make up-embed RERANK=0`        | 0.90             | 0.90         | ~25 ms          |
+| `make up-embed` (with reranker) | **0.96**         | **0.96**     | ~1.8 s          |
 
 Search times were measured inside Kenfold on an Apple M5 CPU, with the models already loaded.
 
@@ -252,14 +252,14 @@ The dev queries were used to tune the pipeline; the holdout queries were written
 
 ## MCP tools
 
-| Tool | Purpose |
-|---|---|
+| Tool          | Purpose                                                                                                                    |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `get_context` | Load preferences, a pending handoff, recent session summaries, project knowledge, and task-relevant memories at task start |
-| `remember` | Store a durable memory (optionally superseding an old one) |
-| `recall` | Natural-language search over shared memory |
-| `handoff` | Leave a note for the next agent or session |
-| `resume` | Pick up the latest handoff |
-| `forget` | Soft-delete a memory |
+| `remember`    | Store a durable memory (optionally superseding an old one)                                                                 |
+| `recall`      | Natural-language search over shared memory                                                                                 |
+| `handoff`     | Leave a note for the next agent or session                                                                                 |
+| `resume`      | Pick up the latest handoff                                                                                                 |
+| `forget`      | Soft-delete a memory                                                                                                       |
 
 Full contract: [docs/mcp-tools.md](docs/mcp-tools.md).
 
@@ -314,38 +314,38 @@ kenfold version
 
 ## Configuration
 
-| Variable | Default |
-|---|---|
-| `KENFOLD_HTTP_ADDR` | `127.0.0.1:7077` |
-| `KENFOLD_DATABASE_URL` | `postgres://kenfold:kenfold@127.0.0.1:54329/kenfold?sslmode=disable` (compose database) |
-| `KENFOLD_DATABASE_PASSWORD` | unset; optional password override for a PostgreSQL URL, escaped automatically. Compose passes `KENFOLD_DB_PASSWORD` through this setting |
-| `KENFOLD_AUTO_MIGRATE` | `false` (`true` in compose); `serve` and `mcp` refuse to run on an outdated schema |
-| `KENFOLD_ALLOWED_HOSTS` | `localhost,127.0.0.1,::1`, the Host allowlist for `/mcp` |
-| `KENFOLD_AUTH` | `apikey`, or `none` |
-| `KENFOLD_PUBLIC_URL` | unset. The https URL remote clients reach Kenfold at, e.g. `https://kenfold.example.com` (no path); its host is added to `KENFOLD_ALLOWED_HOSTS`, and it enables OAuth |
-| `KENFOLD_OAUTH` | on when `KENFOLD_PUBLIC_URL` is set; the built-in OAuth 2.1 authorization server |
-| `KENFOLD_OAUTH_DCR` | `true`; dynamic client registration (clients identified by a metadata document URL work either way) |
-| `KENFOLD_DASHBOARD` | `local`: the dashboard at `/dashboard/` answers on loopback host names only, not through a proxy or tunnel. `remote` also serves it on the `KENFOLD_PUBLIC_URL` host; `off` turns it off |
-| `KENFOLD_AGENT` | agent name for `kenfold mcp` (stdio), e.g. `codex` |
-| `KENFOLD_EMBED_URL` | unset (full-text search only). Any OpenAI-compatible embeddings API, e.g. `http://127.0.0.1:11434/v1` for Ollama |
-| `KENFOLD_EMBED_MODEL` | `bge-m3`. Must produce 1024-dimensional vectors |
-| `KENFOLD_EMBED_NAME` | unset; the model name recorded with vectors when `KENFOLD_EMBED_MODEL` is a local alias with identical output (`make up-embed` uses `kenfold-embed`, recorded as `bge-m3`) |
-| `KENFOLD_EMBED_API_KEY` | unset; sent as a bearer token to the embeddings API |
-| `KENFOLD_EMBED_DIMENSIONS` | `false`; send `dimensions=1024` (for models such as `text-embedding-3-large`) |
-| `KENFOLD_SEARCH_MAX_DISTANCE` | `0.55`, the cosine distance above which vector matches are ignored |
-| `KENFOLD_RERANK_URL` | unset (no reranking). A `/rerank` API: llama.cpp `llama-server --reranking` (`make up-embed` runs one), Jina, Cohere (`https://api.cohere.com/v2`), Voyage |
-| `KENFOLD_RERANK_MODEL` | `bge-reranker-v2-m3` |
-| `KENFOLD_RERANK_API_KEY` | unset; sent as a bearer token to the rerank API |
-| `KENFOLD_CHAT_URL` | unset (no extraction). Any OpenAI-compatible chat API, e.g. `http://127.0.0.1:11434/v1` for Ollama |
-| `KENFOLD_CHAT_MODEL` | `qwen3.5:4b` (`make up-extract` uses `kenfold-extract`, the same model with a thread limit) |
-| `KENFOLD_CHAT_API_KEY` | unset; sent as a bearer token to the chat API |
-| `KENFOLD_CHAT_REASONING` | `none`, sent as `reasoning_effort`; `omit` for servers that reject the field |
-| `KENFOLD_EXTRACT` | on when a chat model is configured |
-| `KENFOLD_EXTRACT_POLICY` | `propose` (review everything) or `auto` |
-| `KENFOLD_CLASSIFY` | on when a chat model is configured; types memories stored without one |
-| `KENFOLD_CONSOLIDATE` | on when a chat model is configured; proposes to retire duplicates and contradicted memories and to digest old sessions |
-| `KENFOLD_LOG_LEVEL` | `info` |
-| `KENFOLD_UPDATE_CHECK` | `true`. A release build checks GitHub for a newer version and reports it. It does not download or restart |
+| Variable                      | Default                                                                                                                                                                                  |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `KENFOLD_HTTP_ADDR`           | `127.0.0.1:7077`                                                                                                                                                                         |
+| `KENFOLD_DATABASE_URL`        | `postgres://kenfold:kenfold@127.0.0.1:54329/kenfold?sslmode=disable` (compose database)                                                                                                  |
+| `KENFOLD_DATABASE_PASSWORD`   | unset; optional password override for a PostgreSQL URL, escaped automatically. Compose passes `KENFOLD_DB_PASSWORD` through this setting                                                 |
+| `KENFOLD_AUTO_MIGRATE`        | `false` (`true` in compose); `serve` and `mcp` refuse to run on an outdated schema                                                                                                       |
+| `KENFOLD_ALLOWED_HOSTS`       | `localhost,127.0.0.1,::1`, the Host allowlist for `/mcp`                                                                                                                                 |
+| `KENFOLD_AUTH`                | `apikey`, or `none`                                                                                                                                                                      |
+| `KENFOLD_PUBLIC_URL`          | unset. The https URL remote clients reach Kenfold at, e.g. `https://kenfold.example.com` (no path); its host is added to `KENFOLD_ALLOWED_HOSTS`, and it enables OAuth                   |
+| `KENFOLD_OAUTH`               | on when `KENFOLD_PUBLIC_URL` is set; the built-in OAuth 2.1 authorization server                                                                                                         |
+| `KENFOLD_OAUTH_DCR`           | `true`; dynamic client registration (clients identified by a metadata document URL work either way)                                                                                      |
+| `KENFOLD_DASHBOARD`           | `local`: the dashboard at `/dashboard/` answers on loopback host names only, not through a proxy or tunnel. `remote` also serves it on the `KENFOLD_PUBLIC_URL` host; `off` turns it off |
+| `KENFOLD_AGENT`               | agent name for `kenfold mcp` (stdio), e.g. `codex`                                                                                                                                       |
+| `KENFOLD_EMBED_URL`           | unset (full-text search only). Any OpenAI-compatible embeddings API, e.g. `http://127.0.0.1:11434/v1` for Ollama                                                                         |
+| `KENFOLD_EMBED_MODEL`         | `bge-m3`. Must produce 1024-dimensional vectors                                                                                                                                          |
+| `KENFOLD_EMBED_NAME`          | unset; the model name recorded with vectors when `KENFOLD_EMBED_MODEL` is a local alias with identical output (`make up-embed` uses `kenfold-embed`, recorded as `bge-m3`)               |
+| `KENFOLD_EMBED_API_KEY`       | unset; sent as a bearer token to the embeddings API                                                                                                                                      |
+| `KENFOLD_EMBED_DIMENSIONS`    | `false`; send `dimensions=1024` (for models such as `text-embedding-3-large`)                                                                                                            |
+| `KENFOLD_SEARCH_MAX_DISTANCE` | `0.55`, the cosine distance above which vector matches are ignored                                                                                                                       |
+| `KENFOLD_RERANK_URL`          | unset (no reranking). A `/rerank` API: llama.cpp `llama-server --reranking` (`make up-embed` runs one), Jina, Cohere (`https://api.cohere.com/v2`), Voyage                               |
+| `KENFOLD_RERANK_MODEL`        | `bge-reranker-v2-m3`                                                                                                                                                                     |
+| `KENFOLD_RERANK_API_KEY`      | unset; sent as a bearer token to the rerank API                                                                                                                                          |
+| `KENFOLD_CHAT_URL`            | unset (no extraction). Any OpenAI-compatible chat API, e.g. `http://127.0.0.1:11434/v1` for Ollama                                                                                       |
+| `KENFOLD_CHAT_MODEL`          | `qwen3.5:4b` (`make up-extract` uses `kenfold-extract`, the same model with a thread limit)                                                                                              |
+| `KENFOLD_CHAT_API_KEY`        | unset; sent as a bearer token to the chat API                                                                                                                                            |
+| `KENFOLD_CHAT_REASONING`      | `none`, sent as `reasoning_effort`; `omit` for servers that reject the field                                                                                                             |
+| `KENFOLD_EXTRACT`             | on when a chat model is configured                                                                                                                                                       |
+| `KENFOLD_EXTRACT_POLICY`      | `propose` (review everything) or `auto`                                                                                                                                                  |
+| `KENFOLD_CLASSIFY`            | on when a chat model is configured; types memories stored without one                                                                                                                    |
+| `KENFOLD_CONSOLIDATE`         | on when a chat model is configured; proposes to retire duplicates and contradicted memories and to digest old sessions                                                                   |
+| `KENFOLD_LOG_LEVEL`           | `info`                                                                                                                                                                                   |
+| `KENFOLD_UPDATE_CHECK`        | `true`. A release build checks GitHub for a newer version and reports it. It does not download or restart                                                                                |
 
 The hook and `kenfold refs sync` read `KENFOLD_URL` (default `http://127.0.0.1:7077/mcp`; the REST API is at `/api/v1` next to it) and `KENFOLD_API_KEY` (unless `--key-file` is given); the hook also reads `KENFOLD_STATE_DIR` (default `~/.local/state/kenfold`).
 
@@ -445,12 +445,12 @@ docs/                 ADRs and specs
 
 ## Roadmap
 
-| Phase | Scope |
-|---|---|
-| **0** ✅ | Schema, MCP contract, skeleton, compose |
-| **1** ✅ | Real storage and hybrid search, API keys, CLI, Claude Code / Codex / OpenCode setup |
-| **2** ✅ | Secret filter, duplicate and contradiction hints, session hooks with automatic session summaries |
-| **2b** ✅ | Model-based extraction of memories from sessions (reviewed), type classification |
-| **3** ✅ | Rerank, graph expansion, recency and staleness in ranking, code references with commit-based invalidation (tree-sitter symbols), REST API |
-| **4** ✅ | OAuth 2.1 authorization server (client metadata documents, dynamic registration, `private_key_jwt`, read-only grants), remote deployment behind a tunnel or proxy; verified end to end with the MCP SDK's OAuth client over HTTPS, not yet from ChatGPT itself. Object storage and an OpenAI-compatible proxy were deferred ([ADR-0003](docs/adr/0003-remote-access-and-oauth.md)) |
-| 5 | Export/import ✅, review dashboard ✅, consolidation ✅ ([ADR-0004](docs/adr/0004-consolidation.md)); public benchmarks (LongMemEval, LoCoMo): validation incomplete, [partial results and accounting](internal/bench/testdata/RESULTS.md) |
+| Phase     | Scope                                                                                                                                                                                                                                                                                                                                                                              |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **0** ✅  | Schema, MCP contract, skeleton, compose                                                                                                                                                                                                                                                                                                                                            |
+| **1** ✅  | Real storage and hybrid search, API keys, CLI, Claude Code / Codex / OpenCode setup                                                                                                                                                                                                                                                                                                |
+| **2** ✅  | Secret filter, duplicate and contradiction hints, session hooks with automatic session summaries                                                                                                                                                                                                                                                                                   |
+| **2b** ✅ | Model-based extraction of memories from sessions (reviewed), type classification                                                                                                                                                                                                                                                                                                   |
+| **3** ✅  | Rerank, graph expansion, recency and staleness in ranking, code references with commit-based invalidation (tree-sitter symbols), REST API                                                                                                                                                                                                                                          |
+| **4** ✅  | OAuth 2.1 authorization server (client metadata documents, dynamic registration, `private_key_jwt`, read-only grants), remote deployment behind a tunnel or proxy; verified end to end with the MCP SDK's OAuth client over HTTPS, not yet from ChatGPT itself. Object storage and an OpenAI-compatible proxy were deferred ([ADR-0003](docs/adr/0003-remote-access-and-oauth.md)) |
+| 5         | Export/import ✅, review dashboard ✅, consolidation ✅ ([ADR-0004](docs/adr/0004-consolidation.md)); public benchmarks (LongMemEval, LoCoMo): validation incomplete, [partial results and accounting](internal/bench/testdata/RESULTS.md)                                                                                                                                         |
