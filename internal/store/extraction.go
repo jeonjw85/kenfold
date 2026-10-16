@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/kenfold/kenfold/internal/memory"
+	"github.com/kenfold/kenfold/internal/secrets"
 )
 
 // Extraction job states.
@@ -257,6 +258,7 @@ func (s *Store) Reject(ctx context.Context, id, reason, agent string) (Memory, e
 	if !ValidID(id) {
 		return Memory{}, ErrInvalidID
 	}
+	reason, _ = secrets.Redact(reason)
 	var m Memory
 	err := scan(s.pool.QueryRow(ctx, `
 		UPDATE memory SET status = 'deleted',

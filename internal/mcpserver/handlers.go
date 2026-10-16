@@ -285,7 +285,8 @@ func (h *handlers) forget(ctx context.Context, req *mcp.CallToolRequest, in Forg
 	}
 	// forget must always succeed, so a secret in the reason is redacted rather
 	// than rejected.
-	reason, _ := secrets.Redact(truncateRunes(strings.TrimSpace(in.Reason), maxReasonRunes))
+	reason, _ := secrets.Redact(strings.TrimSpace(in.Reason))
+	reason = truncateRunes(reason, maxReasonRunes)
 	m, err := h.store.SoftDelete(ctx, id, reason, h.agentOf(req))
 	if errors.Is(err, store.ErrNotFound) {
 		return toolError[ForgetOutput](fmt.Sprintf("memory %s not found", id))
@@ -299,12 +300,13 @@ func (h *handlers) forget(ctx context.Context, req *mcp.CallToolRequest, in Forg
 // ---- recall ----
 
 func (h *handlers) recall(ctx context.Context, _ *mcp.CallToolRequest, in RecallInput) (*mcp.CallToolResult, RecallOutput, error) {
-	query := truncateRunes(strings.TrimSpace(in.Query), maxQueryRunes)
+	query := strings.TrimSpace(in.Query)
 	if query == "" {
 		return toolError[RecallOutput]("query must not be empty")
 	}
 	// Queries are not stored, but they are sent to the embedding provider.
 	query, _ = secrets.Redact(query)
+	query = truncateRunes(query, maxQueryRunes)
 	scope, err := scopeFor(in.Project)
 	if err != nil {
 		return toolError[RecallOutput](err.Error())
@@ -493,8 +495,9 @@ func (h *handlers) getContext(ctx context.Context, _ *mcp.CallToolRequest, in Ge
 		}
 	}
 
-	if task := truncateRunes(strings.TrimSpace(in.Task), maxQueryRunes); task != "" {
+	if task := strings.TrimSpace(in.Task); task != "" {
 		task, _ = secrets.Redact(task)
+		task = truncateRunes(task, maxQueryRunes)
 		res, err := h.search(ctx, "get_context", task, scope, nil, contextRelevant)
 		if err != nil {
 			return nil, GetContextOutput{}, h.internal(ctx, "get_context", err)
