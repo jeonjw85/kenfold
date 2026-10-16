@@ -20,6 +20,7 @@ import (
 	"github.com/kenfold/kenfold/internal/memory"
 	"github.com/kenfold/kenfold/internal/oauth"
 	"github.com/kenfold/kenfold/internal/retrieve"
+	"github.com/kenfold/kenfold/internal/secrets"
 	"github.com/kenfold/kenfold/internal/store"
 )
 
@@ -324,6 +325,7 @@ func (s *Server) reject(w http.ResponseWriter, r *http.Request) {
 	if reason == "" {
 		reason = "rejected in the dashboard"
 	}
+	reason, _ = secrets.Redact(reason)
 	if utf8.RuneCountInString(reason) > 500 {
 		reason = string([]rune(reason)[:500])
 	}
@@ -394,7 +396,8 @@ func (s *Server) memories(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case d.Query != "" && d.Status == string(memory.StatusActive) && !d.Stale:
 		d.Searched = true
-		res, err := s.d.Retriever.Search(ctx, retrieve.Query{Text: truncateRunes(d.Query, 2000), Scope: d.Scope, AllScopes: d.Scope == "", Types: types, Limit: pageSize})
+		query, _ := secrets.Redact(d.Query)
+		res, err := s.d.Retriever.Search(ctx, retrieve.Query{Text: truncateRunes(query, 2000), Scope: d.Scope, AllScopes: d.Scope == "", Types: types, Limit: pageSize})
 		if err != nil {
 			s.serverError(w, r, err)
 			return
@@ -491,6 +494,7 @@ func (s *Server) forget(w http.ResponseWriter, r *http.Request) {
 	if reason == "" {
 		reason = "forgotten in the dashboard"
 	}
+	reason, _ = secrets.Redact(reason)
 	if utf8.RuneCountInString(reason) > 500 {
 		reason = string([]rune(reason)[:500])
 	}

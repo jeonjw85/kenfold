@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kenfold/kenfold/internal/memory"
+	"github.com/kenfold/kenfold/internal/secrets"
 )
 
 // EmbeddingDim is the fixed dimension of memory.embedding (see migrations).
@@ -285,6 +286,8 @@ func (s *Store) SoftDelete(ctx context.Context, id, reason, agent string) (Memor
 	if !ValidID(id) {
 		return Memory{}, ErrInvalidID
 	}
+	// Audit reasons are stored too; redact instead of blocking a deletion.
+	reason, _ = secrets.Redact(reason)
 	var m Memory
 	err := scan(s.pool.QueryRow(ctx, `
 		UPDATE memory
