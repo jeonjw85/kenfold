@@ -22,6 +22,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       -o /out/kenfold ./cmd/kenfold
 
 FROM gcr.io/distroless/static-debian13:nonroot
+LABEL io.modelcontextprotocol.server.name="io.github.jeonjw85/kenfold"
 COPY --from=build /out/kenfold /usr/local/bin/kenfold
 # Listen on all interfaces inside the container; compose publishes to host loopback only.
 ENV KENFOLD_HTTP_ADDR=0.0.0.0:7077

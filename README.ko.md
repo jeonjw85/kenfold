@@ -31,6 +31,8 @@ Kenfold는 Claude Code, Codex, OpenCode, ChatGPT, 로컬 모델이 [MCP](https:/
 - 추출 메모리 기반 LoCoMo와 LongMemEval QA는 미채점
 - [부분 결과와 측정 한계](internal/bench/testdata/RESULTS.md)(영문) 참고
 
+공식 MCP Registry 메타데이터와 관리자 등록 절차: [docs/mcp-registry.md](docs/mcp-registry.md). 소스 설치 안내용이며 자동 설치 패키지나 공용 호스팅 주소를 제공하는 항목은 아닙니다.
+
 ## 빠른 시작
 
 - 필요 도구: Git, Make, Docker와 Compose
