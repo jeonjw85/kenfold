@@ -30,6 +30,8 @@ The main design choices (see [ADR-0001](docs/adr/0001-architecture.md)):
 
 > **Status: Phase 5 features implemented; public benchmark validation incomplete.** Shared storage, hybrid search, session hooks, memory extraction, code references, OAuth remote access, export/import, a review dashboard, and consolidation are implemented. The latest scored run preserved partial raw-LoCoMo results for 1,402/1,540 questions, then stopped on unknown API usage. Extracted-LoCoMo and LongMemEval QA were not scored; no complete benchmark result is claimed. See the [qualified partial results and accounting](internal/bench/testdata/RESULTS.md).
 
+Official MCP Registry metadata and maintainer publishing steps: [docs/mcp-registry.md](docs/mcp-registry.md). This is a source-install listing; no automatic package installation or shared hosted endpoint is advertised.
+
 ## Quickstart
 
 Requirements: Docker with Compose. Go 1.27+ only for development.
