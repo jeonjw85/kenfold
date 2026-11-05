@@ -34,7 +34,7 @@ Usage:
   kenfold serve                        run the HTTP server (MCP at /mcp)
   kenfold healthcheck                  check the running server and database readiness
   kenfold mcp                          run the MCP server over stdio
-  kenfold migrate [up|down|status]     manage the database schema
+  kenfold migrate [up|down|status]     manage the database schema (down needs --yes)
 
   kenfold key create <agent>           create an API key for an agent (e.g. claude-code, codex)
   kenfold key list [--all]             list API keys (--all includes revoked keys)
@@ -83,7 +83,7 @@ Environment:
   KENFOLD_DATABASE_URL         PostgreSQL URL             (default: local compose database)
   KENFOLD_DATABASE_PASSWORD    optional password override (URL-escaped automatically)
   KENFOLD_AUTO_MIGRATE         migrate on serve           (default false)
-  KENFOLD_ALLOWED_HOSTS        Host allowlist for /mcp    (default localhost,127.0.0.1,::1)
+  KENFOLD_ALLOWED_HOSTS        Host allowlist; replaces the defaults (default localhost,127.0.0.1,::1)
   KENFOLD_PUBLIC_URL           https URL remote clients reach Kenfold at, e.g. https://kenfold.example.com
                                (its host is allowed; enables OAuth)
   KENFOLD_OAUTH                built-in OAuth authorization server (default: on with KENFOLD_PUBLIC_URL)
@@ -126,7 +126,7 @@ func main() {
 
 	if err := run(ctx, os.Args[1:], os.Getenv, os.Stdin, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, "kenfold:", err)
-		if errors.Is(err, errUsage) {
+		if errors.Is(err, errUsage) || errors.Is(err, errNeedsConfirmation) {
 			os.Exit(2)
 		}
 		os.Exit(1)
@@ -149,17 +149,21 @@ type cli struct {
 	errOut io.Writer // diagnostics (stderr)
 }
 
-func updateEnabled(getenv func(string) string) bool {
+func updateEnabled(getenv func(string) string) (bool, error) {
 	v := strings.TrimSpace(getenv("KENFOLD_UPDATE_CHECK"))
 	if v == "" {
-		return true
+		return true, nil
 	}
 	b, err := strconv.ParseBool(v)
-	return err == nil && b
+	if err != nil {
+		return false, fmt.Errorf("KENFOLD_UPDATE_CHECK: %q is not a boolean", v)
+	}
+	return b, nil
 }
 
 func updateLine(ctx context.Context, getenv func(string) string) string {
-	if !updateEnabled(getenv) || !update.IsRelease(buildinfo.Version) {
+	enabled, err := updateEnabled(getenv)
+	if err != nil || !enabled || !update.IsRelease(buildinfo.Version) {
 		return ""
 	}
 	cctx, cancel := context.WithTimeout(ctx, update.Timeout)
@@ -172,6 +176,14 @@ func updateLine(ctx context.Context, getenv func(string) string) string {
 }
 
 func run(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) error {
+	err := runCommand(ctx, args, getenv, stdin, stdout, stderr)
+	if errors.Is(err, errHelpRequested) {
+		return nil
+	}
+	return err
+}
+
+func runCommand(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return usageErr("missing command")
@@ -181,6 +193,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdin i
 	switch cmd {
 	case "version", "--version", "-v":
 		fmt.Fprintf(stdout, "kenfold %s (commit %s, built %s)\n", buildinfo.Version, buildinfo.Commit, buildinfo.Date)
+		if _, err := updateEnabled(getenv); err != nil {
+			fmt.Fprintf(stderr, "kenfold: %v (update check disabled)\n", err)
+		}
 		if line := updateLine(ctx, getenv); line != "" {
 			fmt.Fprint(stdout, line)
 		}
@@ -213,16 +228,25 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdin i
 
 	switch cmd {
 	case "serve":
+		if helpIfRequested(rest, "serve", stdout) {
+			return nil
+		}
 		if len(rest) > 0 {
 			return usageErr("serve takes no arguments")
 		}
 		return c.serve(ctx)
 	case "healthcheck":
+		if helpIfRequested(rest, "healthcheck", stdout) {
+			return nil
+		}
 		if len(rest) > 0 {
 			return usageErr("healthcheck takes no arguments")
 		}
 		return c.healthcheck(ctx)
 	case "mcp":
+		if helpIfRequested(rest, "mcp", stdout) {
+			return nil
+		}
 		if len(rest) > 0 {
 			return usageErr("mcp takes no arguments")
 		}
@@ -248,6 +272,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdin i
 	case "import":
 		return c.importArchive(ctx, rest)
 	case "reindex":
+		if helpIfRequested(rest, "reindex", stdout) {
+			return nil
+		}
 		if len(rest) > 0 {
 			return usageErr("reindex takes no arguments")
 		}
@@ -262,11 +289,18 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdin i
 
 // parseArgs parses flags that may appear before, between, or after positional
 // arguments (Go's flag package stops at the first positional argument).
-func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
+// Asking for help is not a usage error: it prints the command's usage line and
+// flag defaults to stdout and returns errHelpRequested, which run treats as a
+// successful exit.
+func parseArgs(fs *flag.FlagSet, args []string, out io.Writer) ([]string, error) {
 	fs.SetOutput(io.Discard)
 	var positional []string
 	for {
 		if err := fs.Parse(args); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				printFlagHelp(fs, out)
+				return nil, errHelpRequested
+			}
 			return nil, usageErr("%s: %v", fs.Name(), err)
 		}
 		args = fs.Args()
@@ -276,4 +310,32 @@ func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 		positional = append(positional, args[0])
 		args = args[1:]
 	}
+}
+
+// errHelpRequested reports that -h/--help was handled and the command should
+// exit successfully.
+var errHelpRequested = errors.New("help requested")
+
+// printFlagHelp writes a usage line and the command's flags.
+func printFlagHelp(fs *flag.FlagSet, out io.Writer) {
+	fmt.Fprintf(out, "Usage: kenfold %s [flags] [arguments]\n", fs.Name())
+	var b strings.Builder
+	fs.SetOutput(&b)
+	fs.PrintDefaults()
+	fs.SetOutput(io.Discard)
+	if b.Len() > 0 {
+		fmt.Fprint(out, "\nFlags:\n")
+		fmt.Fprint(out, b.String())
+	}
+}
+
+// helpIfRequested handles -h/--help for commands that take no flags.
+func helpIfRequested(args []string, name string, out io.Writer) bool {
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "-help" {
+			fmt.Fprintf(out, "Usage: kenfold %s\n", name)
+			return true
+		}
+	}
+	return false
 }

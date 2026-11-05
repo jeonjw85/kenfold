@@ -121,7 +121,7 @@ Only Caddy's ports are published on the network; Kenfold stays on `127.0.0.1:707
 Any other reverse proxy works if it:
 
 - terminates TLS;
-- passes the `Host` header through (or you add its value to `KENFOLD_ALLOWED_HOSTS`);
+- passes the `Host` header through (or you add its value to `KENFOLD_ALLOWED_HOSTS`, which replaces the loopback defaults; include `localhost,127.0.0.1,::1` to keep local clients working);
 - does not buffer `text/event-stream` responses;
 - serves Kenfold at the root of the host, not under a path prefix.
 

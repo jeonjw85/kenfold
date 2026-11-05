@@ -197,14 +197,14 @@ func TestParseArgsInterspersed(t *testing.T) {
 	fs := flag.NewFlagSet("t", flag.ContinueOnError)
 	reason := fs.String("reason", "", "")
 	all := fs.Bool("all", false, "")
-	pos, err := parseArgs(fs, []string{"id-1", "--reason", "wrong fact", "id-2", "--all"})
+	pos, err := parseArgs(fs, []string{"id-1", "--reason", "wrong fact", "id-2", "--all"}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(pos, []string{"id-1", "id-2"}) || *reason != "wrong fact" || !*all {
 		t.Errorf("pos=%v reason=%q all=%v", pos, *reason, *all)
 	}
-	if _, err := parseArgs(flag.NewFlagSet("t", flag.ContinueOnError), []string{"--nope"}); !errors.Is(err, errUsage) {
+	if _, err := parseArgs(flag.NewFlagSet("t", flag.ContinueOnError), []string{"--nope"}, io.Discard); !errors.Is(err, errUsage) {
 		t.Errorf("unknown flag err = %v", err)
 	}
 }

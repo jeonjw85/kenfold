@@ -29,7 +29,7 @@ func refsSync(ctx context.Context, args []string, getenv func(string) string, st
 	keyFile := fs.String("key-file", "", "file containing an API key")
 	keyEnv := fs.String("key-env", "KENFOLD_API_KEY", "environment variable holding the API key")
 	quiet := fs.Bool("quiet", false, "print nothing on success")
-	pos, err := parseArgs(fs, args)
+	pos, err := parseArgs(fs, args, stdout)
 	if err != nil {
 		return err
 	}
@@ -100,7 +100,7 @@ func (c *cli) refs(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("refs status", flag.ContinueOnError)
 	scopeArg := fs.String("scope", "", "'project:<id>' or a git remote URL / project name (default: all projects)")
 	limit := fs.Int("limit", 50, "maximum stale memories to list (1-500)")
-	pos, err := parseArgs(fs, args[1:])
+	pos, err := parseArgs(fs, args[1:], c.out)
 	if err != nil {
 		return err
 	}
@@ -112,9 +112,12 @@ func (c *cli) refs(ctx context.Context, args []string) error {
 	}
 	scope := ""
 	if v := strings.TrimSpace(*scopeArg); v != "" {
+		if v == memory.ScopeUser {
+			return usageErr("--scope: a project is required")
+		}
 		if strings.HasPrefix(v, "project:") || strings.HasPrefix(v, "repo:") {
 			scope = v
-		} else if scope, err = memory.Scope(v); err != nil || scope == memory.ScopeUser {
+		} else if scope, err = memory.Scope(v); err != nil {
 			return usageErr("--scope: a project is required")
 		}
 	}

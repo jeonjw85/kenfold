@@ -29,7 +29,7 @@ func hookCmd(ctx context.Context, args []string, getenv func(string) string, std
 	agent := fs.String("agent", "", "client name reported to the server (only used when the server runs without API keys)")
 	noCapture := fs.Bool("no-capture", false, "load memory at session start, but do not record sessions")
 	noRefs := fs.Bool("no-refs", false, "do not check the code that memories refer to at session start")
-	pos, err := parseArgs(fs, args)
+	pos, err := parseArgs(fs, args, stdout)
 	if err != nil {
 		return err
 	}
@@ -75,7 +75,7 @@ func hookConfig(args []string, getenv func(string) string, stdout io.Writer) err
 	fs := flag.NewFlagSet("hook config", flag.ContinueOnError)
 	keyFile := fs.String("key-file", "", "file containing the agent's API key (recommended)")
 	url := fs.String("url", "", "Kenfold MCP endpoint, if not "+hook.DefaultURL)
-	pos, err := parseArgs(fs, args)
+	pos, err := parseArgs(fs, args, stdout)
 	if err != nil {
 		return err
 	}

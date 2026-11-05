@@ -181,7 +181,7 @@ docker compose -f compose.yaml -f deploy/compose.caddy.yaml up -d --build --wait
 다른 리버스 프록시의 사용 조건
 
 - TLS 처리
-- Host 헤더를 그대로 전달하거나 전달할 호스트를 `KENFOLD_ALLOWED_HOSTS`에 추가
+- Host 헤더를 그대로 전달하거나 전달할 호스트를 `KENFOLD_ALLOWED_HOSTS`에 추가 (이 값을 설정하면 기본값을 대체하므로, 로컬 클라이언트를 계속 쓰려면 `localhost,127.0.0.1,::1`도 함께 넣습니다)
 - `text/event-stream` 응답 버퍼링 비활성화
 - 경로 접두사 없이 호스트 루트에서 Kenfold 제공
 

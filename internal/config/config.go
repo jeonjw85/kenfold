@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"slices"
@@ -190,6 +191,9 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 		c.AllowedHosts = nil
 		for h := range strings.SplitSeq(v, ",") {
 			if h = strings.TrimSpace(h); h != "" {
+				if err := validateHost(h); err != nil {
+					return Config{}, fmt.Errorf("KENFOLD_ALLOWED_HOSTS: %w", err)
+				}
 				c.AllowedHosts = append(c.AllowedHosts, h)
 			}
 		}
@@ -206,7 +210,7 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 
-	if v := getenv("KENFOLD_LOG_LEVEL"); v != "" {
+	if v := strings.TrimSpace(getenv("KENFOLD_LOG_LEVEL")); v != "" {
 		if err := c.LogLevel.UnmarshalText([]byte(v)); err != nil {
 			return Config{}, fmt.Errorf("KENFOLD_LOG_LEVEL: %w", err)
 		}
@@ -229,7 +233,7 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 		}
 	}
 
-	if v := getenv("KENFOLD_SEARCH_MAX_DISTANCE"); v != "" {
+	if v := strings.TrimSpace(getenv("KENFOLD_SEARCH_MAX_DISTANCE")); v != "" {
 		f, err := strconv.ParseFloat(v, 64)
 		if err != nil || !(f > 0 && f <= 2) {
 			return Config{}, fmt.Errorf("KENFOLD_SEARCH_MAX_DISTANCE: %q must be a number in (0, 2]", v)
@@ -239,8 +243,11 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 
 	if v := strings.TrimSpace(getenv("KENFOLD_PUBLIC_URL")); v != "" {
 		u, err := url.Parse(v)
-		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
-			return Config{}, fmt.Errorf("KENFOLD_PUBLIC_URL: %q must be a base URL such as https://kenfold.example.com (no path)", v)
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+			return Config{}, fmt.Errorf("KENFOLD_PUBLIC_URL: %q must be an http(s) base URL such as https://kenfold.example.com", v)
+		}
+		if problem := publicURLProblem(u); problem != "" {
+			return Config{}, fmt.Errorf("KENFOLD_PUBLIC_URL: %q must be a base URL with %s (such as https://kenfold.example.com)", v, problem)
 		}
 		if u.Scheme == "http" && !loopbackHost(u.Hostname()) {
 			return Config{}, fmt.Errorf("KENFOLD_PUBLIC_URL: %q must use https; OAuth tokens and the owner password must not cross the network in the clear", v)
@@ -256,7 +263,7 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 		def bool
 	}{{"KENFOLD_OAUTH", &c.OAuth, c.PublicURL != ""}, {"KENFOLD_OAUTH_DCR", &c.OAuthDCR, true}} {
 		*s.dst = s.def
-		if v := getenv(s.key); v != "" {
+		if v := strings.TrimSpace(getenv(s.key)); v != "" {
 			b, err := strconv.ParseBool(v)
 			if err != nil {
 				return Config{}, fmt.Errorf("%s: %q is not a boolean", s.key, v)
@@ -308,7 +315,7 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 	switch c.Chat.Reasoning {
 	case "none", "omit", "minimal", "low", "medium", "high":
 	default:
-		return Config{}, fmt.Errorf("KENFOLD_CHAT_REASONING: %q is not one of none, low, medium, high, omit", c.Chat.Reasoning)
+		return Config{}, fmt.Errorf("KENFOLD_CHAT_REASONING: %q is not one of none, minimal, low, medium, high, omit", c.Chat.Reasoning)
 	}
 	switch c.ExtractPolicy {
 	case ExtractPropose, ExtractAuto:
@@ -357,4 +364,38 @@ func boolEnv(getenv func(string) string, key string) (bool, error) {
 func loopbackHost(h string) bool {
 	h = strings.Trim(strings.ToLower(h), "[]")
 	return h == "localhost" || h == "127.0.0.1" || h == "::1"
+}
+
+// validateHost rejects an allowlist entry that can never equal a normalized
+// Host header, which would silently lock clients out. An optional port is
+// accepted and ignored, matching the Host check.
+func validateHost(h string) error {
+	if strings.ContainsAny(h, " \t/\\?#@*") || strings.Contains(h, "://") {
+		return fmt.Errorf("%q is not a bare host name or IP address (no scheme, path, wildcard, or spaces; e.g. kenfold.example.com)", h)
+	}
+	host := h
+	if hh, _, err := net.SplitHostPort(h); err == nil {
+		host = hh
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" || (net.ParseIP(host) == nil && strings.Contains(host, ":")) {
+		return fmt.Errorf("%q is not a bare host name or IP address (no scheme, path, wildcard, or spaces; e.g. kenfold.example.com)", h)
+	}
+	return nil
+}
+
+// publicURLProblem names the part of a parsed KENFOLD_PUBLIC_URL that makes it
+// unusable as a base URL, or "" when it is fine.
+func publicURLProblem(u *url.URL) string {
+	switch {
+	case u.User != nil:
+		return "no credentials"
+	case u.Path != "" && u.Path != "/":
+		return "no path"
+	case u.RawQuery != "":
+		return "no query"
+	case u.Fragment != "":
+		return "no fragment"
+	}
+	return ""
 }

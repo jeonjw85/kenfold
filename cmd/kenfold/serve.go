@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/pressly/goose/v3"
 
 	"github.com/kenfold/kenfold/internal/apikey"
 	"github.com/kenfold/kenfold/internal/buildinfo"
@@ -356,6 +357,7 @@ func watchUpdates(ctx context.Context, cache *update.Cache, log *slog.Logger) {
 
 // logSecurityPosture warns about configurations that expose memory.
 func (c *cli) logSecurityPosture(ctx context.Context, rt *runtime) {
+	c.logger.Info("host allowlist", "hosts", c.cfg.AllowedHosts)
 	if c.cfg.Auth == config.AuthNone {
 		host, _, _ := net.SplitHostPort(c.cfg.HTTPAddr)
 		if ip := net.ParseIP(host); host == "localhost" || (ip != nil && ip.IsLoopback()) {
@@ -442,12 +444,109 @@ func (c *cli) checkSchema(ctx context.Context) error {
 	return migrations.CheckCurrent(ctx, c.cfg.DatabaseURL)
 }
 
+// errNeedsConfirmation reports that a destructive command printed what it
+// would do and stopped. It is not a usage error: the command is well formed.
+var errNeedsConfirmation = errors.New("confirmation required")
+
+// previewMigrateDown prints the migration that `migrate down --yes` would roll
+// back and the warning that it can drop tables and data.
+func (c *cli) previewMigrateDown(ctx context.Context, p *goose.Provider) error {
+	statuses, err := p.Status(ctx)
+	if err != nil {
+		return fmt.Errorf("migrate down: %w", err)
+	}
+	var latest *goose.MigrationStatus
+	for _, s := range statuses {
+		if s.State == goose.StateApplied && (latest == nil || s.Source.Version > latest.Source.Version) {
+			latest = s
+		}
+	}
+	if latest == nil {
+		fmt.Fprintln(c.out, "No migrations are applied; nothing to roll back.")
+		return nil
+	}
+	fmt.Fprintf(c.out, "Would roll back %s (schema version %d).\n", latest.Source.Path, latest.Source.Version)
+	if impact := downImpact(migrationSQL(latest.Source.Path)); len(impact) > 0 {
+		fmt.Fprintln(c.out, "This removes:")
+		for _, item := range impact {
+			fmt.Fprintf(c.out, "  - %s\n", item)
+		}
+	}
+	fmt.Fprintln(c.out, "A down migration can drop tables and data, and it cannot be undone. Run `kenfold migrate down --yes` to proceed.")
+	return fmt.Errorf("%w: rerun with --yes to roll back %s", errNeedsConfirmation, latest.Source.Path)
+}
+
+// migrationSQL returns an embedded migration's SQL, or "" when it cannot be
+// read. The preview is advisory, so a read failure must not block the warning.
+func migrationSQL(path string) string {
+	b, err := migrations.FS.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// downImpact lists the objects a migration's Down section drops or alters, in
+// statement order, so the preview can name what data is at risk.
+func downImpact(sql string) []string {
+	_, down, ok := strings.Cut(sql, "-- +goose Down")
+	if !ok {
+		return nil
+	}
+	var out []string
+	for line := range strings.SplitSeq(down, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "--") {
+			continue
+		}
+		if !strings.HasPrefix(strings.ToUpper(line), "DROP ") && !strings.HasPrefix(strings.ToUpper(line), "ALTER ") {
+			continue
+		}
+		out = append(out, describeStatement(line))
+	}
+	return out
+}
+
+// describeStatement turns "DROP TABLE memory;" into "table memory" and
+// "ALTER TABLE memory DROP COLUMN embedding_model;" into
+// "column memory.embedding_model".
+func describeStatement(stmt string) string {
+	s := strings.TrimSuffix(strings.TrimSpace(stmt), ";")
+	fields := strings.Fields(s)
+	if len(fields) < 3 {
+		return s
+	}
+	switch strings.ToUpper(fields[0]) {
+	case "DROP":
+		return strings.ToLower(fields[1]) + " " + fields[2]
+	case "ALTER":
+		// ALTER TABLE <table> DROP COLUMN <column>
+		if len(fields) >= 6 && strings.EqualFold(fields[1], "TABLE") && strings.EqualFold(fields[3], "DROP") {
+			return "column " + fields[2] + "." + fields[5]
+		}
+	}
+	return s
+}
+
 func (c *cli) migrate(ctx context.Context, args []string) error {
+	if helpIfRequested(args, "migrate [up|down|status] [--yes]", c.out) {
+		return nil
+	}
 	sub := "up"
-	switch len(args) {
+	yes := false
+	rest := args
+	if len(rest) > 0 && (rest[0] == "--yes" || rest[0] == "-yes") {
+		yes = true
+		rest = rest[1:]
+	}
+	if len(rest) > 0 && (rest[len(rest)-1] == "--yes" || rest[len(rest)-1] == "-yes") {
+		yes = true
+		rest = rest[:len(rest)-1]
+	}
+	switch len(rest) {
 	case 0:
 	case 1:
-		sub = args[0]
+		sub = rest[0]
 	default:
 		return usageErr("migrate takes at most one argument")
 	}
@@ -455,6 +554,9 @@ func (c *cli) migrate(ctx context.Context, args []string) error {
 	case "up", "down", "status":
 	default:
 		return usageErr("unknown migrate command %q (want up|down|status)", sub)
+	}
+	if yes && sub != "down" {
+		return usageErr("--yes applies only to `migrate down`")
 	}
 
 	p, err := migrations.Provider(c.cfg.DatabaseURL)
@@ -478,11 +580,14 @@ func (c *cli) migrate(ctx context.Context, args []string) error {
 		}
 		fmt.Fprintf(c.out, "schema version %d\n", v)
 	case "down":
+		if !yes {
+			return c.previewMigrateDown(ctx, p)
+		}
 		r, err := p.Down(ctx)
 		if err != nil {
 			return fmt.Errorf("migrate down: %w", err)
 		}
-		fmt.Fprintf(c.out, "rolled back %s\n", r.Source.Path)
+		fmt.Fprintf(c.out, "rolled back %s (this may have dropped tables and data)\n", r.Source.Path)
 	case "status":
 		statuses, err := p.Status(ctx)
 		if err != nil {

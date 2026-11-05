@@ -24,7 +24,7 @@ var errSecretsFound = errors.New("secrets found")
 func (c *cli) scan(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
 	redact := fs.Bool("redact", false, "replace detected secrets in place")
-	pos, err := parseArgs(fs, args)
+	pos, err := parseArgs(fs, args, c.out)
 	if err != nil {
 		return err
 	}

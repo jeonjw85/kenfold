@@ -281,7 +281,7 @@ Full contract: [docs/mcp-tools.md](docs/mcp-tools.md).
 kenfold serve                        HTTP server (MCP at /mcp, /healthz, /readyz)
 kenfold healthcheck                  check the server and database schema (exit 1 if not ready)
 kenfold mcp                          MCP over stdio
-kenfold migrate [up|down|status]     database migrations
+kenfold migrate [up|down|status]     database migrations (down needs --yes)
 kenfold key create <agent>           create an API key (printed once, to stdout)
 kenfold key list [--all]             list keys (--all includes revoked)
 kenfold key revoke <id|prefix>       revoke a key
@@ -322,7 +322,7 @@ kenfold version
 | `KENFOLD_DATABASE_URL`        | `postgres://kenfold:kenfold@127.0.0.1:54329/kenfold?sslmode=disable` (compose database)                                                                                                  |
 | `KENFOLD_DATABASE_PASSWORD`   | unset; optional password override for a PostgreSQL URL, escaped automatically. Compose passes `KENFOLD_DB_PASSWORD` through this setting                                                 |
 | `KENFOLD_AUTO_MIGRATE`        | `false` (`true` in compose); `serve` and `mcp` refuse to run on an outdated schema                                                                                                       |
-| `KENFOLD_ALLOWED_HOSTS`       | `localhost,127.0.0.1,::1`, the Host allowlist for `/mcp`                                                                                                                                 |
+| `KENFOLD_ALLOWED_HOSTS`       | `localhost,127.0.0.1,::1`, the Host allowlist for `/mcp`, `/api`, the dashboard, and the OAuth endpoints. **Setting it replaces the defaults**, so include loopback names if local clients must keep working; entries are bare host names or IPs (no scheme or path) |
 | `KENFOLD_AUTH`                | `apikey`, or `none`                                                                                                                                                                      |
 | `KENFOLD_PUBLIC_URL`          | unset. The https URL remote clients reach Kenfold at, e.g. `https://kenfold.example.com` (no path); its host is added to `KENFOLD_ALLOWED_HOSTS`, and it enables OAuth                   |
 | `KENFOLD_OAUTH`               | on when `KENFOLD_PUBLIC_URL` is set; the built-in OAuth 2.1 authorization server                                                                                                         |

@@ -82,6 +82,30 @@ func appliedMessage(p store.Proposal) string {
 	}
 }
 
+// consolidationOffReason explains why the server makes no consolidation
+// proposals, or "" when it does.
+func consolidationOffReason(chatConfigured, enabled bool) string {
+	switch {
+	case !chatConfigured:
+		return "Consolidation is off (it needs a chat model, KENFOLD_CHAT_URL), so the server makes no proposals."
+	case !enabled:
+		return "Consolidation is disabled (KENFOLD_CONSOLIDATE=false), so the server makes no proposals."
+	}
+	return ""
+}
+
+// extractionOffReason explains why the server does not extract memories, or ""
+// when it does.
+func extractionOffReason(chatConfigured, enabled bool) string {
+	switch {
+	case !chatConfigured:
+		return "No chat model is configured (KENFOLD_CHAT_URL), so the server does not extract."
+	case !enabled:
+		return "Extraction is disabled (KENFOLD_EXTRACT=false), so the server does not extract."
+	}
+	return ""
+}
+
 // consolidateCmd runs `kenfold consolidate ...`.
 func (c *cli) consolidateCmd(ctx context.Context, args []string) error {
 	if len(args) == 0 {
@@ -97,7 +121,7 @@ func (c *cli) consolidateCmd(ctx context.Context, args []string) error {
 	if sub == "run" {
 		fs := flag.NewFlagSet("consolidate run", flag.ContinueOnError)
 		limit = fs.Int("limit", 20, "maximum pairs to judge")
-		pos, err := parseArgs(fs, args)
+		pos, err := parseArgs(fs, args, c.out)
 		if err != nil {
 			return err
 		}
@@ -131,8 +155,8 @@ func (c *cli) consolidateCmd(ctx context.Context, args []string) error {
 		}
 		fmt.Fprintf(c.out, "proposals: %d pending, %d applied, %d rejected, %d stale; %d pairs judged distinct\n",
 			pending, n[store.ProposalApplied], n[store.ProposalRejected], n[store.ProposalStale]+n[store.ProposalPending]-pending, n[store.ProposalDismissed])
-		if rt.chat == nil || !c.cfg.Consolidate {
-			fmt.Fprintln(c.errOut, "Consolidation is off (it needs a chat model, KENFOLD_CHAT_URL), so the server makes no proposals.")
+		if reason := consolidationOffReason(rt.chat != nil, c.cfg.Consolidate); reason != "" {
+			fmt.Fprintln(c.errOut, reason)
 		}
 		return nil
 	case "list":

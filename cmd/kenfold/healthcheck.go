@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -41,6 +43,13 @@ func (c *cli) healthcheck(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		reason, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		var status struct {
+			Status string `json:"status"`
+		}
+		if json.Unmarshal(reason, &status) == nil && status.Status != "" {
+			return fmt.Errorf("server is not ready: %s (%s)", resp.Status, status.Status)
+		}
 		return fmt.Errorf("server is not ready: %s", resp.Status)
 	}
 	fmt.Fprintln(c.out, "ready")

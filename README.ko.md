@@ -367,7 +367,7 @@ bin/kenfold import --dry-run backup.jsonl && bin/kenfold import backup.jsonl
 kenfold serve                        HTTP 서버 실행
 kenfold healthcheck                  서버와 DB 스키마 준비 상태 확인
 kenfold mcp                          stdio MCP 서버 실행
-kenfold migrate [up|down|status]      DB 마이그레이션
+kenfold migrate [up|down|status]      DB 마이그레이션 (`down`은 `--yes` 필요)
 kenfold key create <agent>           API 키 발급: stdout에 한 번만 표시
 kenfold key list [--all]             키 목록
 kenfold key revoke <id|prefix>       키 철회
@@ -403,7 +403,7 @@ kenfold version
 | `KENFOLD_DATABASE_URL` | `postgres://kenfold:kenfold@127.0.0.1:54329/kenfold?sslmode=disable` (로컬 Compose DB) |
 | `KENFOLD_DATABASE_PASSWORD` | 미설정, PostgreSQL URL의 비밀번호를 별도로 지정하고 자동 이스케이프, Compose는 `KENFOLD_DB_PASSWORD` 전달 |
 | `KENFOLD_AUTO_MIGRATE` | `false`, Compose는 `true`, `serve`와 `mcp`는 오래된 스키마에서 실행 거절 |
-| `KENFOLD_ALLOWED_HOSTS` | `localhost,127.0.0.1,::1` (Host 허용 목록) |
+| `KENFOLD_ALLOWED_HOSTS` | `localhost,127.0.0.1,::1` (Host 허용 목록). **이 값을 설정하면 기본값을 대체**하므로, 로컬 클라이언트도 계속 쓰려면 loopback 이름을 함께 넣어야 합니다. 항목은 스킴·경로 없는 호스트 이름 또는 IP만 가능 |
 | `KENFOLD_AUTH` | `apikey` 또는 `none` |
 | `KENFOLD_PUBLIC_URL` | 미설정, 경로 없는 공개 HTTPS URL, 호스트를 허용 목록에 추가하고 OAuth 활성화 |
 | `KENFOLD_OAUTH` | 공개 URL 설정 시 활성화 |

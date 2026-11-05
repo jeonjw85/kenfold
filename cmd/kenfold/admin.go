@@ -37,7 +37,7 @@ func (c *cli) key(ctx context.Context, args []string) error {
 	sub, args := args[0], args[1:]
 	switch sub {
 	case "create":
-		pos, err := parseArgs(flag.NewFlagSet("key create", flag.ContinueOnError), args)
+		pos, err := parseArgs(flag.NewFlagSet("key create", flag.ContinueOnError), args, c.out)
 		if err != nil {
 			return err
 		}
@@ -66,7 +66,7 @@ func (c *cli) key(ctx context.Context, args []string) error {
 	case "list":
 		fs := flag.NewFlagSet("key list", flag.ContinueOnError)
 		all := fs.Bool("all", false, "include revoked keys")
-		pos, err := parseArgs(fs, args)
+		pos, err := parseArgs(fs, args, c.out)
 		if err != nil {
 			return err
 		}
@@ -94,7 +94,7 @@ func (c *cli) key(ctx context.Context, args []string) error {
 		return w.Flush()
 
 	case "revoke":
-		pos, err := parseArgs(flag.NewFlagSet("key revoke", flag.ContinueOnError), args)
+		pos, err := parseArgs(flag.NewFlagSet("key revoke", flag.ContinueOnError), args, c.out)
 		if err != nil {
 			return err
 		}
@@ -138,7 +138,7 @@ func (c *cli) memory(ctx context.Context, args []string) error {
 	case "forget":
 		fs := flag.NewFlagSet("memory forget", flag.ContinueOnError)
 		reason := fs.String("reason", "", "why the memory is wrong or no longer needed")
-		pos, err := parseArgs(fs, args)
+		pos, err := parseArgs(fs, args, c.out)
 		if err != nil {
 			return err
 		}
@@ -170,7 +170,7 @@ func (c *cli) memoryList(ctx context.Context, args []string) error {
 	scope := fs.String("scope", "", "'user', 'project:<id>', or a git remote URL / project name (default: all scopes)")
 	limit := fs.Int("limit", 50, "maximum rows (1-500)")
 	stale := fs.Bool("stale", false, "only memories whose referenced code was removed or changed")
-	pos, err := parseArgs(fs, args)
+	pos, err := parseArgs(fs, args, c.out)
 	if err != nil {
 		return err
 	}
@@ -253,10 +253,17 @@ func (c *cli) reindex(ctx context.Context) error {
 	}
 	fmt.Fprintf(c.out, "embedded %d memories with %s", stats.Embedded, rt.embedder.Model())
 	if stats.Skipped > 0 {
-		fmt.Fprintf(c.out, " (%d skipped: the provider rejected them; see logs)", stats.Skipped)
+		fmt.Fprint(c.out, skippedBackfillMessage(stats.Skipped))
 	}
 	fmt.Fprintln(c.out)
 	return nil
+}
+
+// skippedBackfillMessage explains rows Backfill could not embed. They are not
+// necessarily rejected inputs: a row whose content changed during the run is
+// also skipped, and rows are retried on the next run.
+func skippedBackfillMessage(n int) string {
+	return fmt.Sprintf(" (%d skipped: the provider rejected the text or it changed during the run; the next run retries them)", n)
 }
 
 // ---- formatting ----

@@ -20,7 +20,7 @@ import (
 func (c *cli) approveMany(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("memory approve", flag.ContinueOnError)
 	replaces := fs.String("replaces", "", "id of an active memory the approved one replaces (it becomes superseded)")
-	ids, err := parseArgs(fs, args)
+	ids, err := parseArgs(fs, args, c.out)
 	if err != nil {
 		return err
 	}
@@ -66,7 +66,7 @@ func (c *cli) approveMany(ctx context.Context, args []string) error {
 func (c *cli) rejectMany(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("memory reject", flag.ContinueOnError)
 	reason := fs.String("reason", "", "why the memory is wrong or not worth keeping")
-	ids, err := parseArgs(fs, args)
+	ids, err := parseArgs(fs, args, c.out)
 	if err != nil {
 		return err
 	}
@@ -114,7 +114,7 @@ func (c *cli) review(ctx context.Context, args []string, in io.Reader) error {
 	fs := flag.NewFlagSet("memory review", flag.ContinueOnError)
 	scope := fs.String("scope", "", "only memories in this scope ('user', 'project:<id>', or a git remote URL)")
 	limit := fs.Int("limit", 50, "maximum memories to review (1-500)")
-	pos, err := parseArgs(fs, args)
+	pos, err := parseArgs(fs, args, c.out)
 	if err != nil {
 		return err
 	}
@@ -262,14 +262,14 @@ func (c *cli) extract(ctx context.Context, args []string) error {
 		}
 		fmt.Fprintf(c.out, "session summaries: %d pending, %d running, %d done, %d failed; %d memories extracted\n",
 			st.Pending, st.Running, st.Done, st.Failed, st.Stored)
-		if rt.chat == nil {
-			fmt.Fprintln(c.errOut, "No chat model is configured (KENFOLD_CHAT_URL), so the server does not extract.")
+		if reason := extractionOffReason(rt.chat != nil, c.cfg.Extract); reason != "" {
+			fmt.Fprintln(c.errOut, reason)
 		}
 		return nil
 	case "run":
 		fs := flag.NewFlagSet("extract run", flag.ContinueOnError)
 		limit := fs.Int("limit", 20, "maximum summaries to process")
-		pos, err := parseArgs(fs, args)
+		pos, err := parseArgs(fs, args, c.out)
 		if err != nil {
 			return err
 		}

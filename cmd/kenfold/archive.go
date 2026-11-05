@@ -28,7 +28,7 @@ func (c *cli) export(ctx context.Context, args []string) (err error) {
 	out := fs.String("out", "-", "file to write (created with mode 0600; must not exist), or - for stdout")
 	scopeArg := fs.String("scope", "", "only this scope: 'user', 'project:<id>', or a git remote URL / project name")
 	activeOnly := fs.Bool("active", false, "only active and proposed memories (default: everything, including history)")
-	pos, err := parseArgs(fs, args)
+	pos, err := parseArgs(fs, args, c.out)
 	if err != nil {
 		return err
 	}
@@ -96,7 +96,7 @@ func (c *cli) export(ctx context.Context, args []string) (err error) {
 func (c *cli) importArchive(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("import", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", false, "check the archive and report what would be imported, without writing")
-	pos, err := parseArgs(fs, args)
+	pos, err := parseArgs(fs, args, c.out)
 	if err != nil {
 		return err
 	}

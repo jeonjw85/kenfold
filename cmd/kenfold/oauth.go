@@ -90,7 +90,7 @@ func readPassword(in io.Reader, prompt io.Writer) (string, error) {
 func (c *cli) oauthClients(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("oauth clients", flag.ContinueOnError)
 	all := fs.Bool("all", false, "include revoked grants")
-	pos, err := parseArgs(fs, args)
+	pos, err := parseArgs(fs, args, c.out)
 	if err != nil {
 		return err
 	}
