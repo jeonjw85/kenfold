@@ -148,8 +148,8 @@ func (s *Store) SeenContent(ctx context.Context, scope, content string) (Memory,
 	err := scan(s.pool.QueryRow(ctx, `
 		SELECT `+columns+` FROM memory
 		WHERE scope = $1
-		  AND md5(content_key) = md5(lower(regexp_replace(regexp_replace(btrim($2::text), '\s+', ' ', 'g'), '[.!。]+$', '')))
-		  AND content_key = lower(regexp_replace(regexp_replace(btrim($2::text), '\s+', ' ', 'g'), '[.!。]+$', ''))
+		  AND md5(content_key) = md5(`+contentKeySQL("$2::text")+`)
+		  AND content_key = `+contentKeySQL("$2::text")+`
 		ORDER BY created_at DESC LIMIT 1`, scope, content), &m)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Memory{}, ErrNotFound

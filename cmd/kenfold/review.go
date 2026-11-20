@@ -242,6 +242,9 @@ func scopeArg(v string) (string, error) {
 // ---- extract ----
 
 func (c *cli) extract(ctx context.Context, args []string) error {
+	if dispatcherHelp(args, "extract status|run", c.out) {
+		return nil
+	}
 	if len(args) == 0 {
 		return usageErr("extract: missing subcommand (status|run)")
 	}

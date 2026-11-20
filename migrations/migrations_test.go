@@ -123,14 +123,24 @@ func TestMigrationsIntegration(t *testing.T) {
 		}
 	}
 
-	// 00003: content_key normalizes case, whitespace, and trailing punctuation.
-	var key string
-	if err := db.QueryRowContext(ctx, `INSERT INTO memory (type, scope, content, source_agent)
-		VALUES ('semantic', 'user', E'  We  use\tPGX v5.  ', 't') RETURNING content_key`).Scan(&key); err != nil {
-		t.Fatalf("content_key: %v", err)
-	}
-	if key != "we use pgx v5" {
-		t.Errorf("content_key = %q", key)
+	// 00003/00009: content_key normalizes case, whitespace, and trailing
+	// punctuation. Leading or trailing tabs and newlines must behave like
+	// spaces, and a space before trailing punctuation goes with it.
+	for _, c := range []struct{ content, want string }{
+		{"  We  use\tPGX v5.  ", "we use pgx v5"},
+		{"\tWe  use\tpnpm\n", "we use pnpm"},
+		{"\nWe use pnpm. \r\n", "we use pnpm"},
+		{"We use pnpm .", "we use pnpm"},
+		{"\u00a0배포는\u3000금요일。", "배포는 금요일"},
+	} {
+		var key string
+		if err := db.QueryRowContext(ctx, `INSERT INTO memory (type, scope, content, source_agent)
+			VALUES ('semantic', 'user', $1, 't') RETURNING content_key`, c.content).Scan(&key); err != nil {
+			t.Fatalf("content_key(%q): %v", c.content, err)
+		}
+		if key != c.want {
+			t.Errorf("content_key(%q) = %q, want %q", c.content, key, c.want)
+		}
 	}
 	var sim float64
 	if err := db.QueryRowContext(ctx, `SELECT similarity('deploy on fridays', 'we deploy on fridays')`).Scan(&sim); err != nil || sim <= 0 {

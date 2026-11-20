@@ -339,3 +339,17 @@ func helpIfRequested(args []string, name string, out io.Writer) bool {
 	}
 	return false
 }
+
+// dispatcherHelp handles -h/--help as the first argument of a command that
+// switches on a subcommand. Subcommands with their own flags handle help
+// through parseArgs, so only the leading argument is checked here.
+func dispatcherHelp(args []string, usage string, out io.Writer) bool {
+	if len(args) > 0 {
+		switch args[0] {
+		case "-h", "--help", "-help":
+			fmt.Fprintf(out, "Usage: kenfold %s\n", usage)
+			return true
+		}
+	}
+	return false
+}

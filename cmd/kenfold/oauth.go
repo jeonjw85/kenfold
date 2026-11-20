@@ -19,6 +19,9 @@ import (
 // oauthCmd runs `kenfold oauth ...`: the owner password and the clients the
 // owner approved.
 func (c *cli) oauthCmd(ctx context.Context, args []string) error {
+	if dispatcherHelp(args, "oauth password|clients|revoke", c.out) {
+		return nil
+	}
 	if len(args) == 0 {
 		return usageErr("usage: kenfold oauth password | clients [--all] | revoke <grant-id>")
 	}
@@ -38,6 +41,9 @@ func (c *cli) oauthCmd(ctx context.Context, args []string) error {
 // without echo); otherwise it reads one line from stdin, so it can be run
 // as `docker compose exec -T kenfold kenfold oauth password < file`.
 func (c *cli) oauthPassword(ctx context.Context, args []string) error {
+	if helpIfRequested(args, "password", c.out) {
+		return nil
+	}
 	if len(args) != 0 {
 		return usageErr("password takes no arguments (it reads the password from the terminal or stdin)")
 	}

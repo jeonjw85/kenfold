@@ -43,9 +43,34 @@ func TestHelpFlagPerSubcommand(t *testing.T) {
 		}
 	}
 
+	// Commands that switch on a subcommand answer help too, instead of
+	// reporting the help flag as an unknown subcommand and exiting 2.
+	for _, args := range [][]string{
+		{"key", "--help"},
+		{"memory", "-h"},
+		{"oauth", "--help"},
+		{"consolidate", "-h"},
+		{"extract", "--help"},
+		{"refs", "--help"},
+		{"password", "-h"},
+	} {
+		out, _, err := runCLI(t, nil, args...)
+		if err != nil {
+			t.Errorf("kenfold %v: err = %v, want success", args, err)
+			continue
+		}
+		if !strings.Contains(out, "Usage: kenfold") {
+			t.Errorf("kenfold %v: output = %q, want a usage line", args, out)
+		}
+	}
+
 	// A real flag error is still a usage error.
 	if _, _, err := runCLI(t, nil, "key", "list", "--bogus"); !errors.Is(err, errUsage) {
 		t.Errorf("unknown flag err = %v, want usage", err)
+	}
+	// A genuinely unknown subcommand is still a usage error.
+	if _, _, err := runCLI(t, nil, "key", "frobnicate"); !errors.Is(err, errUsage) {
+		t.Errorf("unknown subcommand err = %v, want usage", err)
 	}
 }
 
@@ -99,6 +124,23 @@ func TestRefsStatusUserScope(t *testing.T) {
 	_, _, err := runCLI(t, nil, "refs", "status", "--scope", "user")
 	if !errors.Is(err, errUsage) || !strings.Contains(err.Error(), "a project is required") {
 		t.Fatalf("refs status --scope user: err = %v", err)
+	}
+}
+
+// TestAPIKeyFromEnvironmentIsTrimmed checks that a key read from the
+// environment is normalized like one read from --key-file. A trailing newline
+// (from a .env file or a systemd EnvironmentFile) otherwise becomes part of
+// the bearer token and can never match a stored key hash.
+func TestAPIKeyFromEnvironmentIsTrimmed(t *testing.T) {
+	getenv := func(k string) string {
+		if k == "KENFOLD_API_KEY" {
+			return "  kf_example_key\n"
+		}
+		return ""
+	}
+	got, err := readKey(getenv, "", "KENFOLD_API_KEY")
+	if err != nil || got != "kf_example_key" {
+		t.Errorf("readKey = %q, %v; want the trimmed key", got, err)
 	}
 }
 

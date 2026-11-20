@@ -83,7 +83,7 @@ func refsSync(ctx context.Context, args []string, getenv func(string) string, st
 // readKey returns the API key from keyFile, or else from the keyEnv variable.
 func readKey(getenv func(string) string, keyFile, keyEnv string) (string, error) {
 	if keyFile == "" {
-		return getenv(keyEnv), nil
+		return strings.TrimSpace(getenv(keyEnv)), nil
 	}
 	b, err := os.ReadFile(expandHome(keyFile, getenv))
 	if err != nil {
@@ -94,6 +94,9 @@ func readKey(getenv func(string) string, keyFile, keyEnv string) (string, error)
 
 // refs runs the database-side `kenfold refs` subcommands.
 func (c *cli) refs(ctx context.Context, args []string) error {
+	if dispatcherHelp(args, "refs sync|status", c.out) {
+		return nil
+	}
 	if len(args) == 0 || args[0] != "status" {
 		return usageErr("usage: kenfold refs sync [flags] | kenfold refs status [--scope S]")
 	}

@@ -56,20 +56,31 @@ func (v consolidationView) Reject(ctx context.Context, id, agent string) error {
 	return proposalErr(v.st.RejectProposal(ctx, id, agent))
 }
 
-// proposalErr explains the expected ways applying or rejecting fails.
+// proposalErr explains the expected ways applying or rejecting fails. The
+// message is what the CLI prints; Unwrap keeps the store's sentinel so the
+// dashboard can still tell these cases apart from an internal failure.
 func proposalErr(err error) error {
 	switch {
 	case err == nil:
 		return nil
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrInvalidID):
-		return errors.New("that proposal does not exist")
+		return proposalError{"that proposal does not exist", err}
 	case errors.Is(err, store.ErrProposalDecided):
-		return errors.New("that proposal was already decided")
+		return proposalError{"that proposal was already decided", err}
 	case errors.Is(err, store.ErrProposalStale):
-		return errors.New("the memories changed since the proposal was made, so nothing was changed")
+		return proposalError{"the memories changed since the proposal was made, so nothing was changed", err}
 	}
 	return err
 }
+
+// proposalError carries a user-facing message and the store error it explains.
+type proposalError struct {
+	msg string
+	err error
+}
+
+func (e proposalError) Error() string { return e.msg }
+func (e proposalError) Unwrap() error { return e.err }
 
 func appliedMessage(p store.Proposal) string {
 	switch p.Kind {
@@ -108,6 +119,9 @@ func extractionOffReason(chatConfigured, enabled bool) string {
 
 // consolidateCmd runs `kenfold consolidate ...`.
 func (c *cli) consolidateCmd(ctx context.Context, args []string) error {
+	if dispatcherHelp(args, "consolidate status|run|list|apply|reject", c.out) {
+		return nil
+	}
 	if len(args) == 0 {
 		return usageErr("consolidate: missing subcommand (status|run|list|apply|reject)")
 	}

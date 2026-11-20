@@ -37,7 +37,9 @@ func hookCmd(ctx context.Context, args []string, getenv func(string) string, std
 		return usageErr("hook takes flags only (or `hook config <claude-code|codex>`)")
 	}
 
-	key := getenv(*keyEnv)
+	// Trim: keys pasted from a .env file or a systemd EnvironmentFile often
+	// carry a trailing newline, and a key must match its stored hash exactly.
+	key := strings.TrimSpace(getenv(*keyEnv))
 	if *keyFile != "" {
 		b, err := os.ReadFile(expandHome(*keyFile, getenv))
 		if err != nil {

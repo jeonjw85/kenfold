@@ -541,7 +541,7 @@ func (s *Server) revokeKey(w http.ResponseWriter, r *http.Request) {
 	k, err := s.d.Keys.Revoke(r.Context(), id)
 	if err != nil {
 		s.log.WarnContext(r.Context(), "dashboard: revoke key failed", "err", err)
-		s.done(w, r, "The key could not be revoked: "+err.Error())
+		s.done(w, r, "The key could not be revoked; the Kenfold server log has details.")
 		return
 	}
 	s.log.InfoContext(r.Context(), "dashboard: API key revoked", "agent", k.Agent, "prefix", k.Prefix)
@@ -557,7 +557,7 @@ func (s *Server) revokeGrant(w http.ResponseWriter, r *http.Request) {
 	g, err := s.d.Owner.RevokeGrant(r.Context(), id)
 	if err != nil {
 		s.log.WarnContext(r.Context(), "dashboard: revoke grant failed", "err", err)
-		s.done(w, r, "The client could not be revoked: "+err.Error())
+		s.done(w, r, "The client could not be revoked; the Kenfold server log has details.")
 		return
 	}
 	s.log.InfoContext(r.Context(), "dashboard: OAuth client revoked", "client_id", g.ClientID, "agent", g.Agent)
@@ -587,7 +587,14 @@ func (s *Server) applyProposal(w http.ResponseWriter, r *http.Request) {
 	msg, err := s.d.Consolidation.Apply(r.Context(), r.PathValue("id"), Agent)
 	if err != nil {
 		s.log.WarnContext(r.Context(), "dashboard: apply proposal failed", "err", err)
-		s.done(w, r, "Not applied: "+err.Error())
+		switch {
+		case errors.Is(err, store.ErrProposalStale):
+			s.done(w, r, "Not applied: the memories changed since this proposal was made.")
+		case errors.Is(err, store.ErrProposalDecided):
+			s.done(w, r, "Not applied: that proposal was already decided.")
+		default:
+			s.done(w, r, "Not applied; the Kenfold server log has details.")
+		}
 		return
 	}
 	s.done(w, r, msg)
@@ -600,7 +607,12 @@ func (s *Server) rejectProposal(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.d.Consolidation.Reject(r.Context(), r.PathValue("id"), Agent); err != nil {
 		s.log.WarnContext(r.Context(), "dashboard: reject proposal failed", "err", err)
-		s.done(w, r, "Not rejected: "+err.Error())
+		switch {
+		case errors.Is(err, store.ErrProposalDecided):
+			s.done(w, r, "Not rejected: this proposal was already decided.")
+		default:
+			s.done(w, r, "Not rejected; the Kenfold server log has details.")
+		}
 		return
 	}
 	s.done(w, r, "Rejected: these memories stay as they are, and this proposal will not be made again.")

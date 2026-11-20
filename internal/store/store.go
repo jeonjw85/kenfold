@@ -143,15 +143,20 @@ func (s *Store) create(ctx context.Context, p CreateParams, duplicateType *memor
 			// the lock key so inferred-type and explicit-type requests coordinate.
 			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended(
 				'kenfold.remember:' || jsonb_build_array($1::text,
-				lower(regexp_replace(regexp_replace(btrim($2::text), '\s+', ' ', 'g'), '[.!。]+$', '')))::text, 0))`, p.Scope, p.Content); err != nil {
+				`+contentKeySQL("$2::text")+`)::text, 0))`, p.Scope, p.Content); err != nil {
 				return err
 			}
 			dup, err := findDuplicate(ctx, tx, p.Scope, *duplicateType, p.Content)
-			if err == nil {
+			// A replacement must retire its target (see Create), so a match
+			// may answer as a duplicate only when it is that target or a
+			// replacement of it that a concurrent request already stored
+			// (same response, not a lost update). Any other match falls
+			// through to the supersede path below.
+			if err == nil && sameStatement(dup, p.Supersedes) {
 				m, deduplicated = dup, true
 				return nil
 			}
-			if !errors.Is(err, ErrNotFound) {
+			if err != nil && !errors.Is(err, ErrNotFound) {
 				return err
 			}
 		}
@@ -183,6 +188,16 @@ func (s *Store) create(ctx context.Context, p CreateParams, duplicateType *memor
 	return m, deduplicated, nil
 }
 
+// sameStatement reports whether dup already satisfies a write that would
+// replace supersedes: the same statement with no replacement, the target
+// itself, or a memory that already replaced the target.
+func sameStatement(dup Memory, supersedes *string) bool {
+	if supersedes == nil || dup.ID == *supersedes {
+		return true
+	}
+	return dup.Supersedes != nil && *dup.Supersedes == *supersedes
+}
+
 // lockActive row-locks id and fails unless it exists and is active.
 func lockActive(ctx context.Context, tx pgx.Tx, id string) error {
 	var status memory.Status
@@ -199,13 +214,24 @@ func lockActive(ctx context.Context, tx pgx.Tx, id string) error {
 	return nil
 }
 
+// contentKeySQL is the SQL form of ContentKey. It must match the generated
+// memory.content_key column (migrations/00009_content_key_whitespace.sql) and
+// ContentKey: collapsing runs first, then trimming, so a leading or trailing
+// tab behaves like a space. The whitespace class is written out because
+// PostgreSQL's \s is locale-dependent and does not cover every Unicode space
+// that Go's unicode.IsSpace does.
+func contentKeySQL(expr string) string {
+	return `lower(regexp_replace(btrim(regexp_replace(` + expr +
+		`, '[\u0009\u000A\u000B\u000C\u000D\u0020\u0085\u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u2028\u2029\u202F\u205F\u3000]+', ' ', 'g'), ' '), '[.!。 ]+$', ''))`
+}
+
 // ContentKey normalizes content the same way as the memory.content_key column
-// (migrations/00003): trimmed, whitespace runs collapsed to one space,
-// trailing '.', '!' or '。' removed, lowercased. Two memories with the same
-// key state the same thing.
+// (migrations/00009): whitespace runs collapsed to one space, trimmed,
+// trailing '.', '!' or '。' removed (with the space before them), lowercased.
+// Two memories with the same key state the same thing.
 func ContentKey(content string) string {
 	s := strings.Join(strings.FieldsFunc(content, unicode.IsSpace), " ")
-	s = strings.TrimRight(s, ".!。")
+	s = strings.TrimRight(s, ".!。 ")
 	return strings.ToLower(s)
 }
 
@@ -225,8 +251,8 @@ func findDuplicate(ctx context.Context, q interface {
 	err := scan(q.QueryRow(ctx, `
 		SELECT `+columns+` FROM memory
 		WHERE scope = $1 AND ($2 = '' OR type = $2)
-		  AND md5(content_key) = md5(lower(regexp_replace(regexp_replace(btrim($3::text), '\s+', ' ', 'g'), '[.!。]+$', '')))
-		  AND content_key = lower(regexp_replace(regexp_replace(btrim($3::text), '\s+', ' ', 'g'), '[.!。]+$', ''))
+		  AND md5(content_key) = md5(`+contentKeySQL("$3::text")+`)
+		  AND content_key = `+contentKeySQL("$3::text")+`
 		  AND status IN ('active', 'proposed')
 		  AND (expires_at IS NULL OR expires_at > now())
 		ORDER BY created_at DESC

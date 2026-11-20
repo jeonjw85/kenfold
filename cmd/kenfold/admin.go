@@ -31,6 +31,9 @@ func (c *cli) connect(ctx context.Context) (*runtime, error) {
 // ---- key ----
 
 func (c *cli) key(ctx context.Context, args []string) error {
+	if dispatcherHelp(args, "key create|list|revoke", c.out) {
+		return nil
+	}
 	if len(args) == 0 {
 		return usageErr("key: missing subcommand (create|list|revoke)")
 	}
@@ -122,6 +125,9 @@ func (c *cli) key(ctx context.Context, args []string) error {
 // ---- memory ----
 
 func (c *cli) memory(ctx context.Context, args []string) error {
+	if dispatcherHelp(args, "memory list|review|approve|reject|forget", c.out) {
+		return nil
+	}
 	if len(args) == 0 {
 		return usageErr("memory: missing subcommand (list|review|approve|reject|forget)")
 	}

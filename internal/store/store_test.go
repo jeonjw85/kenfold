@@ -53,6 +53,17 @@ func TestContentKey(t *testing.T) {
 		"multi\nline\ttext.":   "multi line text",
 		"version 1.2.3":        "version 1.2.3",
 		"":                     "",
+		// A leading or trailing tab or newline must not survive as a space:
+		// the SQL column applies the same normalization.
+		"\tWe use pnpm\n":       "we use pnpm",
+		"\n  We use pnpm  \r\n": "we use pnpm",
+		// Non-ASCII spaces are whitespace too (unicode.IsSpace), and the SQL
+		// class lists them explicitly because \s is locale-dependent.
+		"\u00a0We\u3000use pnpm": "we use pnpm",
+		"배포는　금요일":                "배포는 금요일",
+		// A space before trailing punctuation goes with it.
+		"We use pnpm .":  "we use pnpm",
+		"We use pnpm . ": "we use pnpm",
 	} {
 		if got := ContentKey(in); got != want {
 			t.Errorf("ContentKey(%q) = %q, want %q", in, got, want)

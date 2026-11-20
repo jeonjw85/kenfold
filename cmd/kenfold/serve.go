@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -49,6 +50,11 @@ const (
 	consolidateInterval = 15 * time.Minute
 	probeTimeout        = 15 * time.Second
 	schemaTimeout       = 10 * time.Second
+	// readTimeout bounds reading a request (headers and body) so a client
+	// trickling bytes cannot hold a connection and goroutine forever. SSE
+	// responses are unaffected because WriteTimeout stays unset.
+	readTimeout = 30 * time.Second
+	idleTimeout = 120 * time.Second
 )
 
 // runtime holds the long-lived dependencies shared by the servers.
@@ -208,16 +214,30 @@ func httpHandler(cfg config.Config, rt *runtime, logger *slog.Logger) http.Handl
 		opts.OAuth = rt.oauth.Routes
 		opts.ResourceMetadataURL = rt.oauth.ResourceMetadataURL()
 	}
-	return httpserver.New(mcpserver.New(buildinfo.Version, deps), schemaReadiness{cfg.DatabaseURL}, logger, opts)
+	return httpserver.New(mcpserver.New(buildinfo.Version, deps), newSchemaReadiness(rt.pool), logger, opts)
 }
 
-// A recovered database is only ready after its schema matches the binary.
-// serve may have started while the database was unreachable, and a successful
-// connection alone does not mean its tool queries can run.
-type schemaReadiness struct{ databaseURL string }
+// schemaReadiness answers /readyz. It reuses the runtime's pool: the previous
+// implementation called migrations.CheckCurrent with the database URL, which
+// opened a new connection pool and re-scanned the embedded migrations on every
+// unauthenticated probe.
+type schemaReadiness struct{ pool QueryPinger }
 
-func (s schemaReadiness) Ping(ctx context.Context) error {
-	return migrations.CheckCurrent(ctx, s.databaseURL)
+// QueryPinger is the subset of *pgxpool.Pool used by readiness.
+type QueryPinger interface {
+	Ping(ctx context.Context) error
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func newSchemaReadiness(pool QueryPinger) *schemaReadiness {
+	return &schemaReadiness{pool: pool}
+}
+
+func (s *schemaReadiness) Ping(ctx context.Context) error {
+	if err := s.pool.Ping(ctx); err != nil {
+		return err
+	}
+	return migrations.CheckCurrentWith(ctx, s.pool)
 }
 
 func (c *cli) serve(ctx context.Context) error {
@@ -308,6 +328,9 @@ func (c *cli) serve(ctx context.Context) error {
 		Addr:              c.cfg.HTTPAddr,
 		Handler:           httpHandler(c.cfg, rt, c.logger),
 		ReadHeaderTimeout: 10 * time.Second,
+		// Bounds the whole request read, including a body sent slowly.
+		ReadTimeout: readTimeout,
+		IdleTimeout: idleTimeout,
 		// No WriteTimeout: MCP responses may be long-lived SSE streams.
 	}
 	errc := make(chan error, 1)

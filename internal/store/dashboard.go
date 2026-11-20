@@ -99,7 +99,7 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 		return st, err
 	}
 	if err := s.pool.QueryRow(ctx, `
-		SELECT count(*) FROM memory m WHERE m.status = 'active' AND EXISTS (
+		SELECT count(*) FROM memory m WHERE m.status = 'active' AND (m.expires_at IS NULL OR m.expires_at > now()) AND EXISTS (
 		    SELECT 1 FROM memory_ref r WHERE r.memory_id = m.id AND (r.state = 'missing' OR (r.state = 'changed' AND r.symbol <> '')))`).
 		Scan(&st.Stale); err != nil {
 		return st, fmt.Errorf("stats: %w", err)

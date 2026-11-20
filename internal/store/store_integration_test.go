@@ -655,6 +655,127 @@ func TestStoreIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("content key matches Go normalization", func(t *testing.T) {
+		// ContentKey is used in Go where the store compares two memories (the
+		// supersedes fast path), and content_key in SQL where it looks a
+		// duplicate up. They must agree for every whitespace shape, or a
+		// replacement is either dropped as a no-op or duplicated.
+		if _, err := pool.Exec(ctx, `TRUNCATE memory CASCADE`); err != nil {
+			t.Fatal(err)
+		}
+		cases := []string{
+			"  We  use\tPGX v5.  ",
+			"\tWe  use\tpnpm\n",
+			"\nWe use pnpm. \r\n",
+			"We use pnpm .",
+			"\u00a0배포는\u3000금요일。",
+			"multi\nline\ttext.",
+			"version 1.2.3",
+			"...",
+		}
+		for _, c := range cases {
+			var sqlKey string
+			if err := pool.QueryRow(ctx, `SELECT lower(regexp_replace(btrim(regexp_replace($1::text,
+				'[\u0009\u000A\u000B\u000C\u000D\u0020\u0085\u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u2028\u2029\u202F\u205F\u3000]+', ' ', 'g'), ' '), '[.!。 ]+$', ''))`, c).Scan(&sqlKey); err != nil {
+				t.Fatal(err)
+			}
+			if got := ContentKey(c); got != sqlKey {
+				t.Errorf("ContentKey(%q) = %q, but the column stores %q", c, got, sqlKey)
+			}
+		}
+		// A stored memory with surrounding whitespace is found by its trimmed form.
+		m := create(t, CreateParams{Type: memory.TypeSemantic, Scope: "user", Content: "we use pnpm"})
+		if got, err := s.FindDuplicate(ctx, "user", memory.TypeSemantic, "\tWe use pnpm\n."); err != nil || got.ID != m.ID {
+			t.Errorf("FindDuplicate with surrounding whitespace = %q, %v", got.ID, err)
+		}
+		if got, err := s.SeenContent(ctx, "user", "  WE USE PNPM ."); err != nil || got.ID != m.ID {
+			t.Errorf("SeenContent with surrounding whitespace = %q, %v", got.ID, err)
+		}
+		// The generated column itself agrees for the same pair.
+		var stored string
+		if err := pool.QueryRow(ctx, `INSERT INTO memory (type, scope, content, source_agent, status)
+			VALUES ('semantic', 'user', E'\tWe  use  PNPM\n.', 't', 'active') RETURNING content_key`).Scan(&stored); err != nil {
+			t.Fatal(err)
+		}
+		if stored != ContentKey("we use pnpm") {
+			t.Errorf("content_key = %q, want %q", stored, ContentKey("we use pnpm"))
+		}
+	})
+
+	t.Run("a replacement is not dropped as a duplicate of another memory", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `TRUNCATE memory CASCADE`); err != nil {
+			t.Fatal(err)
+		}
+		scope := "project:ex/session-replace"
+		summary := create(t, CreateParams{Type: memory.TypeEpisodic, Scope: scope, Content: "session one summary",
+			SourceAgent: "codex", SourceSession: "sess-1"})
+		// An unrelated memory happens to have the text of the next summary.
+		other := create(t, CreateParams{Type: memory.TypeSemantic, Scope: scope, Content: "session one summary, updated",
+			SourceAgent: "codex"})
+		// The hook writes the new summary through CreateIfAbsent, whose duplicate
+		// check runs before the supersede path. It must still retire the old
+		// summary and store the new one.
+		replacement, dedup, err := s.CreateIfAbsent(ctx, CreateParams{
+			Type: memory.TypeEpisodic, Scope: scope, Content: "session one summary, updated",
+			SourceAgent: "codex", SourceSession: "sess-1", Trust: memory.TrustAgent,
+			Status: memory.StatusActive, Supersedes: &summary.ID,
+		}, memory.TypeEpisodic)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dedup || replacement.ID == other.ID {
+			t.Fatalf("replacement reported as a duplicate of %s (dedup=%v)", replacement.ID, dedup)
+		}
+		var oldStatus memory.Status
+		if err := pool.QueryRow(ctx, `SELECT status FROM memory WHERE id = $1`, summary.ID).Scan(&oldStatus); err != nil || oldStatus != memory.StatusSuperseded {
+			t.Errorf("old summary status = %s, %v; want superseded", oldStatus, err)
+		}
+		got, err := s.FindSessionMemory(ctx, scope, memory.TypeEpisodic, "codex", "sess-1")
+		if err != nil || got.ID != replacement.ID {
+			t.Errorf("session summary = %q, %v; want the replacement", got.ID, err)
+		}
+	})
+
+	t.Run("stale stats exclude expired memories", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `TRUNCATE memory CASCADE`); err != nil {
+			t.Fatal(err)
+		}
+		scope := "project:ex/stale"
+		live := create(t, CreateParams{Type: memory.TypeCodebase, Scope: scope, Content: "a live fact",
+			Refs: []RefTarget{{Path: "a.go"}}})
+		past := time.Now().Add(-time.Hour)
+		create(t, CreateParams{Type: memory.TypeCodebase, Scope: scope, Content: "an expired fact", ExpiresAt: &past,
+			Refs: []RefTarget{{Path: "b.go"}}})
+		if _, err := s.ApplyRefChecks(ctx, scope, strings.Repeat("a", 40), []RefCheck{
+			{Path: "a.go", Found: true, Hash: "blob:a"},
+			{Path: "b.go", Found: true, Hash: "blob:b"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// Mark both missing at the anchored commit; the expired one must not
+		// count as stale in the dashboard statistics.
+		if _, err := s.ApplyRefChecks(ctx, scope, strings.Repeat("b", 40), []RefCheck{
+			{Path: "a.go", AnchorCommit: strings.Repeat("a", 40), Found: false},
+			{Path: "b.go", AnchorCommit: strings.Repeat("a", 40), Found: false},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		st, err := s.Stats(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		listed, err := s.List(ctx, ListParams{Scopes: []string{scope}, Stale: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Stale != len(listed) {
+			t.Errorf("Stats.Stale = %d, but List(stale) returns %d", st.Stale, len(listed))
+		}
+		if len(listed) != 1 || listed[0].ID != live.ID {
+			t.Errorf("stale list = %d rows, want only the unexpired memory %s", len(listed), live.ID)
+		}
+	})
+
 	t.Run("backfill", func(t *testing.T) {
 		if _, err := pool.Exec(ctx, `TRUNCATE memory CASCADE`); err != nil {
 			t.Fatal(err)

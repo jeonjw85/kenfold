@@ -253,12 +253,21 @@ func (s *Store) Grants(ctx context.Context, all bool) ([]Grant, error) {
 // RevokeGrant revokes a grant (by id or unique id prefix of at least 8
 // characters) and every token issued under it.
 func (s *Store) RevokeGrant(ctx context.Context, ref string) (Grant, error) {
+	ref = strings.TrimSpace(ref)
 	if len(ref) < 8 {
 		return Grant{}, errors.New("give the grant id or at least its first 8 characters")
 	}
+	// A grant id is a UUID, so only hex digits and hyphens can appear in a
+	// prefix. Rejecting anything else keeps the operator's input from acting
+	// as a LIKE pattern ('%' or '_' would otherwise match other grants).
+	for _, c := range ref {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F' || c == '-') {
+			return Grant{}, fmt.Errorf("%q is not a grant id or id prefix (hex digits and '-')", ref)
+		}
+	}
 	var g Grant
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id FROM oauth_grant WHERE id::text LIKE $1 || '%' AND revoked_at IS NULL`, ref)
+		rows, err := tx.Query(ctx, `SELECT id FROM oauth_grant WHERE starts_with(id::text, $1) AND revoked_at IS NULL`, ref)
 		if err != nil {
 			return err
 		}
