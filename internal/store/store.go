@@ -599,11 +599,49 @@ type SimilarParams struct {
 	includeProposed bool // see SimilarAny
 }
 
-// Similar returns active memories in the same scope whose content is close to
-// Content, by vector distance or trigram similarity. Callers present them as
-// "maybe the same fact, or one this contradicts"; nothing is merged. Score is
-// the larger of cosine similarity and trigram similarity.
-func (s *Store) Similar(ctx context.Context, p SimilarParams) ([]Scored, error) {
+// similarSQL implements Similar. Parameters:
+//
+//	$1 scope   $2 content   $3 exclude   $4 vector (NULL = lexical only)
+//	$5 embedding model   $6 max cosine distance   $7 min trigram similarity
+//	$8 limit   $9 statuses
+//
+// The vector branch is ordered by distance with a LIMIT so the HNSW index can
+// serve it (a bare distance range predicate cannot). The final ordering is
+// unchanged: the nearest `limit` rows in a scope are exactly the candidate
+// rows that can reach the top `limit` by score, and the trigram branch selects
+// its own candidates.
+var similarSQL = `
+	WITH vec AS MATERIALIZED (
+	    SELECT m.id, m.embedding <=> $4::text::vector AS dist
+	    FROM memory m
+	    WHERE $4::text IS NOT NULL AND m.embedding IS NOT NULL AND m.embedding_model = $5
+	      AND m.scope = $1 AND m.status = ANY($9)
+	      AND (m.expires_at IS NULL OR m.expires_at > now())
+	      AND ($3::uuid IS NULL OR m.id <> $3::uuid)
+	    ORDER BY m.embedding <=> $4::text::vector
+	    LIMIT $8
+	),
+	cand AS (
+	    SELECT id, 1 - dist AS sim FROM vec WHERE dist <= $6
+	    UNION ALL
+	    SELECT m.id, similarity(m.content, $2) AS sim
+	    FROM memory m
+	    WHERE m.scope = $1 AND m.status = ANY($9)
+	      AND (m.expires_at IS NULL OR m.expires_at > now())
+	      AND ($3::uuid IS NULL OR m.id <> $3::uuid)
+	      AND m.content % $2
+	      AND similarity(m.content, $2) >= $7
+	),
+	best AS (SELECT id, max(sim) AS sim FROM cand GROUP BY id)
+	SELECT ` + mColumns + `, b.sim::float8
+	FROM best b JOIN memory m ON m.id = b.id
+	WHERE m.type <> 'temporary'
+	ORDER BY b.sim DESC, m.created_at DESC
+	LIMIT $8`
+
+// similarArgs validates p and returns the query arguments plus whether a
+// query vector is present.
+func similarArgs(p SimilarParams) ([]any, bool, error) {
 	limit := clamp(p.Limit, 3, 10)
 	maxDist := p.MaxDistance
 	if maxDist <= 0 {
@@ -615,12 +653,12 @@ func (s *Store) Similar(ctx context.Context, p SimilarParams) ([]Scored, error) 
 	}
 	vec, err := vectorParam(p.Vector)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var exclude *string
 	if p.Exclude != "" {
 		if !ValidID(p.Exclude) {
-			return nil, ErrInvalidID
+			return nil, false, ErrInvalidID
 		}
 		exclude = &p.Exclude
 	}
@@ -628,36 +666,47 @@ func (s *Store) Similar(ctx context.Context, p SimilarParams) ([]Scored, error) 
 	if p.includeProposed {
 		statuses = append(statuses, "proposed")
 	}
-	// $1 scope, $2 content, $3 exclude, $4 vector, $5 model, $6 max distance,
-	// $7 min trigram similarity, $8 limit, $9 statuses.
-	rows, err := s.pool.Query(ctx, `
-		WITH cand AS (
-		    SELECT m.id, 1 - (m.embedding <=> $4::text::vector) AS sim
-		    FROM memory m
-		    WHERE $4::text IS NOT NULL AND m.embedding IS NOT NULL AND m.embedding_model = $5
-		      AND m.scope = $1 AND m.status = ANY($9)
-		      AND (m.expires_at IS NULL OR m.expires_at > now())
-		      AND ($3::uuid IS NULL OR m.id <> $3::uuid)
-		      AND m.embedding <=> $4::text::vector <= $6
-		    UNION ALL
-		    SELECT m.id, similarity(m.content, $2) AS sim
-		    FROM memory m
-		    WHERE m.scope = $1 AND m.status = ANY($9)
-		      AND (m.expires_at IS NULL OR m.expires_at > now())
-		      AND ($3::uuid IS NULL OR m.id <> $3::uuid)
-		      AND m.content % $2
-		      AND similarity(m.content, $2) >= $7
-		),
-		best AS (SELECT id, max(sim) AS sim FROM cand GROUP BY id)
-		SELECT `+mColumns+`, b.sim::float8
-		FROM best b JOIN memory m ON m.id = b.id
-		WHERE m.type <> 'temporary'
-		ORDER BY b.sim DESC, m.created_at DESC
-		LIMIT $8`,
-		p.Scope, p.Content, exclude, vec, p.Model, maxDist, minTrgm, limit, statuses)
+	return []any{p.Scope, p.Content, exclude, vec, p.Model, maxDist, minTrgm, limit, statuses}, vec != nil, nil
+}
+
+// Similar returns active memories in the same scope whose content is close to
+// Content, by vector distance or trigram similarity. Callers present them as
+// "maybe the same fact, or one this contradicts"; nothing is merged. Score is
+// the larger of cosine similarity and trigram similarity.
+func (s *Store) Similar(ctx context.Context, p SimilarParams) ([]Scored, error) {
+	args, hasVector, err := similarArgs(p)
+	if err != nil {
+		return nil, err
+	}
+	if !hasVector { // the lexical branch runs on its own
+		rows, err := s.pool.Query(ctx, similarSQL, args...)
+		if err != nil {
+			return nil, fmt.Errorf("similar: %w", err)
+		}
+		return collectSimilar(rows)
+	}
+	// With filters, an HNSW index scan can return fewer than LIMIT rows;
+	// iterative scans (pgvector 0.8+) keep scanning. relaxed_order is
+	// re-sorted by the outer query.
+	var out []Scored
+	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SET LOCAL hnsw.iterative_scan = relaxed_order`); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, similarSQL, args...)
+		if err != nil {
+			return err
+		}
+		out, err = collectSimilar(rows)
+		return err
+	})
 	if err != nil {
 		return nil, fmt.Errorf("similar: %w", err)
 	}
+	return out, nil
+}
+
+func collectSimilar(rows pgx.Rows) ([]Scored, error) {
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Scored, error) {
 		var sc Scored
 		return sc, r.Scan(append(fields(&sc.Memory), &sc.Score)...)

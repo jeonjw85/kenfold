@@ -25,6 +25,12 @@ const (
 	// Failed owner-password attempts before the consent page locks, and for how long.
 	maxFailedLogins = 5
 	lockoutPeriod   = 15 * time.Minute
+	// maxOAuthClients bounds the oauth_client table, which unauthenticated
+	// registration and CIMD fetches can add to. An abandoned client is one
+	// with no grant; those are pruned after abandonedClientRetention and
+	// evicted first when the table is full.
+	maxOAuthClients          = 1000
+	abandonedClientRetention = time.Hour
 )
 
 var (
@@ -32,6 +38,9 @@ var (
 	errInvalid      = errors.New("invalid, expired, or already used")
 	errReuse        = errors.New("refresh token reuse")
 	errInvalidScope = errors.New("requested scopes exceed the refresh token's scopes")
+	// errTooManyClients means the oauth_client table is full of clients that
+	// someone still might use; callers answer 429 and the owner can clear it.
+	errTooManyClients = errors.New("too many registered clients")
 
 	// Owner password checks (the OAuth consent page and the dashboard login).
 	ErrWrongPassword = errors.New("wrong owner password")
@@ -49,10 +58,14 @@ var ownerChecks = make(chan struct{}, 2)
 type Store struct {
 	pool *pgxpool.Pool
 	now  func() time.Time
+	// maxClients bounds the client table; tests lower it.
+	maxClients int
 }
 
 // NewStore returns a Store on pool.
-func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool, now: time.Now} }
+func NewStore(pool *pgxpool.Pool) *Store {
+	return &Store{pool: pool, now: time.Now, maxClients: maxOAuthClients}
+}
 
 // ---- owner ----
 
@@ -188,7 +201,9 @@ func (s *Store) getClient(ctx context.Context, id string) (Client, error) {
 	return c, nil
 }
 
-// putClient inserts or updates a client.
+// putClient inserts or updates a client. Creating a new one is refused when
+// the table is full (errTooManyClients): abandoned clients are evicted first,
+// but a client someone may still approve is never dropped.
 func (s *Store) putClient(ctx context.Context, kind string, m *ClientMetadata, fetched bool) (Client, error) {
 	meta, err := json.Marshal(m)
 	if err != nil {
@@ -199,15 +214,51 @@ func (s *Store) putClient(ctx context.Context, kind string, m *ClientMetadata, f
 		t := s.now()
 		fetchedAt = &t
 	}
-	_, err = s.pool.Exec(ctx, `
-		INSERT INTO oauth_client (client_id, kind, client_name, redirect_uris, metadata, fetched_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (client_id) DO UPDATE SET client_name = $3, redirect_uris = $4, metadata = $5, fetched_at = $6`,
-		m.ClientID, kind, m.ClientName, m.RedirectURIs, meta, fetchedAt)
+	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		// Serialize creation so concurrent unauthenticated requests cannot
+		// all pass the count below.
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('kenfold.oauth_clients', 0))`); err != nil {
+			return err
+		}
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM oauth_client WHERE client_id = $1)`, m.ClientID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			if err := pruneAbandonedClients(ctx, tx); err != nil {
+				return err
+			}
+			var n int
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM oauth_client`).Scan(&n); err != nil {
+				return err
+			}
+			if n >= s.maxClients {
+				return errTooManyClients
+			}
+		}
+		_, err := tx.Exec(ctx, `
+			INSERT INTO oauth_client (client_id, kind, client_name, redirect_uris, metadata, fetched_at)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (client_id) DO UPDATE SET client_name = $3, redirect_uris = $4, metadata = $5, fetched_at = $6`,
+			m.ClientID, kind, m.ClientName, m.RedirectURIs, meta, fetchedAt)
+		return err
+	})
 	if err != nil {
 		return Client{}, err
 	}
 	return s.getClient(ctx, m.ClientID)
+}
+
+// pruneAbandonedClients deletes clients that never got a grant and are older
+// than abandonedClientRetention. A client inside that window may be halfway
+// through onboarding, so it is kept.
+func pruneAbandonedClients(ctx context.Context, tx pgx.Tx) error {
+	_, err := tx.Exec(ctx, `
+		DELETE FROM oauth_client c
+		WHERE c.created_at < now() - make_interval(secs => $1)
+		  AND NOT EXISTS (SELECT 1 FROM oauth_grant g WHERE g.client_id = c.client_id)`,
+		abandonedClientRetention.Seconds())
+	return err
 }
 
 // ---- grants ----
@@ -524,14 +575,13 @@ func (s *Store) verifyAccess(ctx context.Context, token string) (AccessToken, er
 }
 
 // Prune deletes expired codes and tokens, and clients that never got a grant
-// (abandoned registrations) after a day. It returns the rows deleted.
+// (abandoned registrations) after abandonedClientRetention. It returns the
+// rows deleted.
 func (s *Store) Prune(ctx context.Context) (int64, error) {
 	var total int64
 	for _, q := range []string{
 		`DELETE FROM oauth_code WHERE expires_at < now() - interval '1 day'`,
 		`DELETE FROM oauth_token WHERE expires_at < now() - interval '1 day'`,
-		`DELETE FROM oauth_client c WHERE created_at < now() - interval '1 day'
-		   AND NOT EXISTS (SELECT 1 FROM oauth_grant g WHERE g.client_id = c.client_id)`,
 	} {
 		tag, err := s.pool.Exec(ctx, q)
 		if err != nil {
@@ -539,5 +589,13 @@ func (s *Store) Prune(ctx context.Context) (int64, error) {
 		}
 		total += tag.RowsAffected()
 	}
-	return total, nil
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM oauth_client c
+		WHERE c.created_at < now() - make_interval(secs => $1)
+		  AND NOT EXISTS (SELECT 1 FROM oauth_grant g WHERE g.client_id = c.client_id)`,
+		abandonedClientRetention.Seconds())
+	if err != nil {
+		return total, err
+	}
+	return total + tag.RowsAffected(), nil
 }

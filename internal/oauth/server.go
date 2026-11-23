@@ -72,6 +72,9 @@ type Server struct {
 	csrfKey  []byte
 	jwks     jwksCache   // private_key_jwt clients' key sets
 	replay   replayCache // jti of verified client assertions
+
+	registerLimit  *rateLimiter
+	authorizeLimit *rateLimiter
 }
 
 // New returns a Server. PublicURL must be an absolute http(s) URL.
@@ -94,7 +97,9 @@ func New(st *Store, cfg Config) (*Server, error) {
 	}
 	return &Server{
 		cfg: cfg, store: st, issuer: issuer, resource: issuer + cfg.MCPPath, fetcher: cfg.Fetcher, log: cfg.Logger,
-		csrfKey: []byte(randomString(32)),
+		csrfKey:        []byte(randomString(32)),
+		registerLimit:  newRateLimiter(registerBurst, registerPerSecond),
+		authorizeLimit: newRateLimiter(authorizeBurst, authorizePerSecond),
 	}, nil
 }
 
@@ -179,6 +184,10 @@ func (s *Server) asMetadata(w http.ResponseWriter, r *http.Request) {
 // ---- dynamic client registration (RFC 7591) ----
 
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
+	if !s.registerLimit.allow() {
+		rateLimited(w)
+		return
+	}
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -205,6 +214,10 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	m.ResponseTypes = []string{"code"}
 	m.TokenEndpointAuthMethod = "none"
 	if _, err := s.store.putClient(r.Context(), "dcr", &m, false); err != nil {
+		if errors.Is(err, errTooManyClients) {
+			rateLimited(w)
+			return
+		}
 		s.serverError(w, r, "register", err)
 		return
 	}
@@ -295,6 +308,10 @@ type consentData struct {
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if !s.authorizeLimit.allow() {
+			rateLimited(w)
+			return
+		}
 		req, redirectable, err := s.parseAuthRequest(r.Context(), r.URL.Query())
 		if err != nil {
 			s.authError(w, r, req, redirectable, err)
@@ -326,8 +343,14 @@ func (s *Server) parseAuthRequest(ctx context.Context, q url.Values) (authReques
 	if errors.Is(err, errNotFound) {
 		return req, false, &authFailure{"invalid_client", "unknown client; register it or use a client metadata document URL"}
 	}
+	if errors.Is(err, errTooManyClients) || errors.Is(err, errFetchBusy) {
+		return req, false, &authFailure{"temporarily_unavailable", "the server is busy; try again shortly"}
+	}
 	if err != nil {
-		return req, false, &authFailure{"invalid_client", "the client's metadata could not be loaded: " + err.Error()}
+		// Keep fetch and storage details out of an unauthenticated page and
+		// the client redirect; the server log has them.
+		s.log.WarnContext(ctx, "oauth client metadata unavailable", "client_id", req.ClientID, "err", err)
+		return req, false, &authFailure{"invalid_client", "the client's metadata could not be loaded"}
 	}
 	req.client = c
 	if req.RedirectURI == "" && len(c.RedirectURIs) == 1 {
@@ -675,6 +698,13 @@ func writeTokens(w http.ResponseWriter, t Tokens) {
 
 func oauthError(w http.ResponseWriter, code int, errCode, desc string) {
 	writeJSON(w, code, map[string]string{"error": errCode, "error_description": desc})
+}
+
+// rateLimited answers a request that exceeded an unauthenticated endpoint's
+// budget, or the server's client cap.
+func rateLimited(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "1")
+	oauthError(w, http.StatusTooManyRequests, "temporarily_unavailable", "too many requests; try again shortly")
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

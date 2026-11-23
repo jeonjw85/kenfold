@@ -34,6 +34,10 @@ const (
 	cimdMaxBytes = 64 << 10
 	// cimdTTL is how long a fetched document is trusted before re-fetching.
 	cimdTTL = 24 * time.Hour
+	// maxConcurrentFetches bounds outbound requests Kenfold makes on an
+	// unauthenticated caller's behalf. A request that finds every slot busy
+	// fails instead of queueing, so a flood cannot grow the wait set.
+	maxConcurrentFetches = 8
 )
 
 // ClientMetadata is the subset of a client's metadata Kenfold uses.
@@ -219,6 +223,7 @@ var blockedPrefixes = func() []netip.Prefix {
 type CIMDFetcher struct {
 	client       *http.Client
 	allowPrivate bool // tests: loopback addresses and ports are allowed
+	slots        chan struct{}
 }
 
 // NewCIMDFetcher returns a fetcher with the protections described above.
@@ -247,7 +252,7 @@ func NewCIMDFetcher(allowPrivate bool) *CIMDFetcher {
 		IdleConnTimeout:       30 * time.Second,
 		ForceAttemptHTTP2:     true,
 	}
-	return &CIMDFetcher{allowPrivate: allowPrivate, client: &http.Client{
+	return &CIMDFetcher{allowPrivate: allowPrivate, slots: make(chan struct{}, maxConcurrentFetches), client: &http.Client{
 		Transport: tr,
 		Timeout:   cimdTimeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -272,7 +277,28 @@ func (f *CIMDFetcher) Accepts(clientID string) bool {
 	return err == nil
 }
 
+// acquire reserves an outbound slot, or reports that too many fetches are in
+// flight.
+func (f *CIMDFetcher) acquire() (release func(), ok bool) {
+	if f.slots == nil {
+		return func() {}, true
+	}
+	select {
+	case f.slots <- struct{}{}:
+		return func() { <-f.slots }, true
+	default:
+		return nil, false
+	}
+}
+
+var errFetchBusy = errors.New("too many client metadata fetches in progress; try again shortly")
+
 func (f *CIMDFetcher) fetch(ctx context.Context, fetchURL, clientID string) (*ClientMetadata, error) {
+	release, ok := f.acquire()
+	if !ok {
+		return nil, errFetchBusy
+	}
+	defer release()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fetchURL, nil)
 	if err != nil {
 		return nil, err
@@ -309,6 +335,11 @@ func (f *CIMDFetcher) fetch(ctx context.Context, fetchURL, clientID string) (*Cl
 // fetchJWKS retrieves a client's JSON Web Key Set from jwks_uri, with the
 // same protections as metadata documents.
 func (f *CIMDFetcher) fetchJWKS(ctx context.Context, uri string) ([]byte, error) {
+	release, ok := f.acquire()
+	if !ok {
+		return nil, errFetchBusy
+	}
+	defer release()
 	u, err := parseFetchURL(uri, "jwks_uri", f.allowPrivate)
 	if err != nil {
 		return nil, err

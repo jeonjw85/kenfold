@@ -135,9 +135,33 @@ type jwksCache struct {
 	entries map[string]jwksEntry
 }
 
+// maxJwksEntries bounds the cache: keys are only reachable through a stored
+// client, so this matches the client cap and keeps memory use predictable.
+const maxJwksEntries = maxOAuthClients
+
 type jwksEntry struct {
 	keys    []verifierKey
 	fetched time.Time
+}
+
+// put stores keys, evicting the least recently fetched entry when full.
+func (c *jwksCache) put(uri string, keys []verifierKey, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = map[string]jwksEntry{}
+	}
+	if _, exists := c.entries[uri]; !exists && len(c.entries) >= maxJwksEntries {
+		var oldest string
+		var oldestAt time.Time
+		for k, v := range c.entries {
+			if oldest == "" || v.fetched.Before(oldestAt) {
+				oldest, oldestAt = k, v.fetched
+			}
+		}
+		delete(c.entries, oldest)
+	}
+	c.entries[uri] = jwksEntry{keys: keys, fetched: now}
 }
 
 // clientKeys returns the client's signing keys: inline jwks, or its jwks_uri
@@ -163,12 +187,7 @@ func (s *Server) clientKeys(ctx context.Context, c Client, refresh bool) ([]veri
 	if err != nil {
 		return nil, err
 	}
-	s.jwks.mu.Lock()
-	if s.jwks.entries == nil {
-		s.jwks.entries = map[string]jwksEntry{}
-	}
-	s.jwks.entries[uri] = jwksEntry{keys: keys, fetched: now}
-	s.jwks.mu.Unlock()
+	s.jwks.put(uri, keys, now)
 	return keys, nil
 }
 
