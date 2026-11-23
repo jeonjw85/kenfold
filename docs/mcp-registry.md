@@ -16,7 +16,7 @@ verification, protocol certification, or a promise of downstream catalog display
 Consumers that require an installable package or remote endpoint may omit it.
 
 `websiteUrl` points to the source/Compose quickstart. No public package or hosted
-service is claimed. The version is the latest existing release, `0.1.3`, rather
+service is claimed. The version is the latest existing release, `0.1.4`, rather
 than a newly invented release. Before submission, recheck the latest release and
 whether this name/version already exists. Published version metadata is immutable;
 use a new unique version for later metadata changes.
@@ -31,13 +31,13 @@ use a new unique version for later metadata changes.
 | HTTP authentication | Default per-agent Bearer API keys; optional OAuth authorization code + PKCE S256, protected-resource/authorization-server discovery, consent and read/write scopes in `internal/oauth` | Authentication is supported; a listing never contains actual keys or owner credentials |
 | stdio authentication | Direct database access, configured agent identity; no HTTP API key verification | Mark a future database URL as secret; local users must be trusted to access that database |
 | Deployment | Source build and local Docker Compose; PostgreSQL 18 + pgvector, migrated schema required; models optional | Registry stores metadata, not source builds or database provisioning |
-| Released artifacts | v0.1.3 GitHub release has no attached assets; current Compose builds locally; no public image is referenced by this repository | No installable `packages` entry is asserted; a Git source archive is not an MCPB package |
+| Released artifacts | v0.1.4 GitHub release has no attached assets; current Compose builds locally; no public image is referenced by this repository | No installable `packages` entry is asserted; a Git source archive is not an MCPB package |
 | Remote endpoint | README uses loopback or operator-supplied domains; no project-operated public endpoint is documented | Omit `remotes`; do not list localhost, example domains, or a private memory instance |
 | Identity/metadata | Root `server.json`: schema, namespace/name, title, description (under 100 characters), version, repository, website | Owner must authenticate to publish; no external listing agency is needed |
 | Other catalog files | No root `SKILL.md` or `llms.txt` | Neither file is required by the official MCP Registry |
 
 The existing protocol/authentication tests and documentation provide implementation
-evidence, not proof that every hosted client works. The v0.1.3 release explicitly
+evidence, not proof that every hosted client works. The v0.1.4 release explicitly
 notes that real ChatGPT and claude.ai connections have not been tested. This PR
 changes no Go code, database schema, authentication policy, or network exposure.
 
@@ -105,7 +105,7 @@ mcp-publisher login github
 mcp-publisher publish
 
 # Verify the published record.
-curl --fail-with-body 'https://registry.modelcontextprotocol.io/v0.1/servers/io.github.jeonjw85%2Fkenfold/versions/0.1.3'
+curl --fail-with-body 'https://registry.modelcontextprotocol.io/v0.1/servers/io.github.jeonjw85%2Fkenfold/versions/0.1.4'
 ```
 
 The owner must authenticate as `jeonjw85` for this personal GitHub namespace.
