@@ -607,3 +607,32 @@ func journalBudgetForTest(t *testing.T, limit, input, output float64) *Budget {
 	}
 	return b
 }
+
+func TestBudgetJournalReleaseClearsPending(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "budget.json")
+	b := journalBudgetForTest(t, 1, 1.25, 2.5)
+	if err := b.initJournal(path); err != nil {
+		t.Fatal(err)
+	}
+	reserved, err := b.reserve("", "hello", 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.release(reserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.closeJournal(); err != nil {
+		t.Fatal(err)
+	}
+	restarted := journalBudgetForTest(t, 1, 1.25, 2.5)
+	if err := restarted.enableJournal(path); err != nil {
+		t.Fatalf("a released reservation blocked the restart: %v", err)
+	}
+	defer restarted.closeJournal()
+	if restarted.reserved != 0 || restarted.SpentUSD() != 0 || restarted.calls != 0 {
+		t.Fatalf("release left accounting behind: reserved=%g spent=%g calls=%d", restarted.reserved, restarted.SpentUSD(), restarted.calls)
+	}
+	if _, err := restarted.reserve("", "hello", 8); err != nil {
+		t.Fatalf("reserve after release: %v", err)
+	}
+}

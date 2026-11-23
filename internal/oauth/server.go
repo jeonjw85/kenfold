@@ -75,6 +75,8 @@ type Server struct {
 
 	registerLimit  *rateLimiter
 	authorizeLimit *rateLimiter
+	tokenLimit     *rateLimiter
+	revokeLimit    *rateLimiter
 }
 
 // New returns a Server. PublicURL must be an absolute http(s) URL.
@@ -100,6 +102,8 @@ func New(st *Store, cfg Config) (*Server, error) {
 		csrfKey:        []byte(randomString(32)),
 		registerLimit:  newRateLimiter(registerBurst, registerPerSecond),
 		authorizeLimit: newRateLimiter(authorizeBurst, authorizePerSecond),
+		tokenLimit:     newRateLimiter(tokenBurst, tokenPerSecond),
+		revokeLimit:    newRateLimiter(revokeBurst, revokePerSecond),
 	}, nil
 }
 
@@ -546,6 +550,10 @@ func (s *Server) decide(w http.ResponseWriter, r *http.Request) {
 // ---- token endpoint ----
 
 func (s *Server) token(w http.ResponseWriter, r *http.Request) {
+	if !s.tokenLimit.allow() {
+		rateLimited(w)
+		return
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
 	if r.Method != http.MethodPost {
@@ -607,6 +615,10 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) revoke(w http.ResponseWriter, r *http.Request) {
+	if !s.revokeLimit.allow() {
+		rateLimited(w)
+		return
+	}
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
 		oauthError(w, http.StatusMethodNotAllowed, "invalid_request", "use POST")

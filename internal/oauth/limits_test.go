@@ -72,3 +72,36 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 type errNetwork struct{}
 
 func (errNetwork) Error() string { return "dial tcp: lookup client.example: errNetwork" }
+
+func TestTokenRateLimited(t *testing.T) {
+	s := newLimitServer(t)
+	fixed := time.Unix(0, 0)
+	s.tokenLimit = newRateLimiter(1, 0)
+	s.tokenLimit.now = func() time.Time { return fixed }
+	if !s.tokenLimit.allow() {
+		t.Fatal("the first token was refused")
+	}
+	w := httptest.NewRecorder()
+	s.token(w, httptest.NewRequest(http.MethodPost, PathToken, nil))
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("code = %d, want 429", w.Code)
+	}
+	if w.Header().Get("Retry-After") == "" {
+		t.Error("429 without Retry-After")
+	}
+}
+
+func TestRevokeRateLimited(t *testing.T) {
+	s := newLimitServer(t)
+	fixed := time.Unix(0, 0)
+	s.revokeLimit = newRateLimiter(1, 0)
+	s.revokeLimit.now = func() time.Time { return fixed }
+	if !s.revokeLimit.allow() {
+		t.Fatal("the first revocation was refused")
+	}
+	w := httptest.NewRecorder()
+	s.revoke(w, httptest.NewRequest(http.MethodPost, PathRevoke, nil))
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("code = %d, want 429", w.Code)
+	}
+}

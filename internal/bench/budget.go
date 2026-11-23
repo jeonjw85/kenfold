@@ -69,6 +69,33 @@ func (b *Budget) reserve(system, user string, maxTokens int) (float64, error) {
 	return amount, nil
 }
 
+// release returns a reservation for a call that produced no completion (see
+// chat.Unbilled). Nothing was billed, so the reservation is removed instead of
+// spent, and a later retry may reserve again.
+func (b *Budget) release(reserved float64) error {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.journal != nil {
+		if b.journal.lock == nil || b.pending <= 0 || reserved <= 0 || math.IsNaN(reserved) || math.IsInf(reserved, 0) || reserved > b.reserved+1e-12 {
+			return b.journalFailure(errors.New("invalid journaled release or closed journal"))
+		}
+		b.pending--
+	}
+	b.reserved -= reserved
+	if b.journal != nil {
+		if b.pending == 0 {
+			b.reserved = 0
+		}
+		if err := b.persistJournal(); err != nil {
+			return b.journalFailure(err)
+		}
+	}
+	return nil
+}
+
 func (b *Budget) settle(reserved float64, usage chat.Usage) error {
 	if b == nil {
 		return nil

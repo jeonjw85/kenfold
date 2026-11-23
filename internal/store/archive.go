@@ -184,15 +184,22 @@ type ImportSummary struct {
 // ErrArchiveFormat is returned for archives Kenfold cannot read.
 var ErrArchiveFormat = errors.New("not a Kenfold archive, or a newer format")
 
-// Importer writes archive records into the store in one transaction. Records
-// must come in archive order (memories, then edges and refs). Memories that
-// already exist (same id) are left unchanged, so importing the same archive
-// twice is harmless; everything else is inserted as it was, including ids,
-// statuses, and timestamps. Embeddings are filled in by the backfill.
+// Importer writes archive records into the store in one transaction.
+// Memories that already exist (same id) are left unchanged, so importing the
+// same archive twice is harmless; everything else is inserted as it was,
+// including ids, statuses, and timestamps. Embeddings are filled in by the
+// backfill.
+//
+// Edges and references are buffered until every memory is in, because a record
+// that arrives between two memories must not make a supersedes link look
+// orphaned. Archives exported by Kenfold list memories first; hand-written or
+// merged archives need not.
 type Importer struct {
 	tx      pgx.Tx
 	sum     ImportSummary
 	pending []ArchivedMemory // memories whose supersedes target comes later
+	edges   []ArchivedEdge   // applied after the memories
+	refs    []ArchivedRef    // applied after the memories
 }
 
 // Import runs fn with an Importer and commits if fn succeeds.
@@ -212,68 +219,75 @@ func (s *Store) Import(ctx context.Context, fn func(*Importer) error) (ImportSum
 	return sum, err
 }
 
-// Add imports one record.
+// Add buffers one record. Edges and references are written by finish, after
+// every memory has been inserted.
 func (im *Importer) Add(ctx context.Context, r ArchiveRecord) error {
-	if r.Memory == nil {
-		if err := im.finish(ctx); err != nil {
-			return err
-		}
-	}
 	switch {
 	case r.Memory != nil:
 		return im.addMemory(ctx, *r.Memory)
 	case r.Edge != nil:
-		e := r.Edge
+		e := *r.Edge
 		if !ValidID(e.Src) || !ValidID(e.Dst) {
 			return ErrInvalidID
 		}
-		tag, err := im.tx.Exec(ctx, `
-			INSERT INTO memory_edge (src, dst, relation, weight, source_agent, created_at)
-			SELECT $1, $2, $3, $4, $5, $6
-			WHERE EXISTS (SELECT 1 FROM memory WHERE id = $1) AND EXISTS (SELECT 1 FROM memory WHERE id = $2)
-			ON CONFLICT DO NOTHING`, e.Src, e.Dst, e.Relation, e.Weight, e.SourceAgent, e.CreatedAt)
-		if err != nil {
-			return fmt.Errorf("import edge: %w", err)
-		}
-		if tag.RowsAffected() == 1 {
-			im.sum.Edges++
-		} else {
-			im.sum.Skipped++
-		}
-	case r.End != nil:
+		im.edges = append(im.edges, e)
 		return nil
 	case r.Ref != nil:
-		f := r.Ref
+		f := *r.Ref
 		if !ValidID(f.MemoryID) {
 			return ErrInvalidID
 		}
-		var scope string
-		err := im.tx.QueryRow(ctx, `SELECT scope FROM memory WHERE id = $1`, f.MemoryID).Scan(&scope)
-		if errors.Is(err, pgx.ErrNoRows) {
-			im.sum.Skipped++
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if f.Scope != scope {
-			return fmt.Errorf("import code reference: scope %q does not match memory scope %q", f.Scope, scope)
-		}
-		tag, err := im.tx.Exec(ctx, `
-			INSERT INTO memory_ref (memory_id, scope, path, symbol, state, resolved_path, anchor_hash, anchor_commit, checked_commit, checked_at, created_at)
-			SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11 WHERE EXISTS (SELECT 1 FROM memory WHERE id = $1)
-			ON CONFLICT DO NOTHING`,
-			f.MemoryID, f.Scope, f.Path, f.Symbol, f.State, f.ResolvedPath, f.AnchorHash, f.AnchorCommit, f.CheckedCommit, f.CheckedAt, f.CreatedAt)
-		if err != nil {
-			return fmt.Errorf("import code reference: %w", err)
-		}
-		if tag.RowsAffected() == 1 {
-			im.sum.Refs++
-		} else {
-			im.sum.Skipped++
-		}
+		im.refs = append(im.refs, f)
+		return nil
+	case r.End != nil:
+		return nil
 	default:
 		return errors.New("empty archive record")
+	}
+}
+
+func (im *Importer) addEdge(ctx context.Context, e ArchivedEdge) error {
+	tag, err := im.tx.Exec(ctx, `
+		INSERT INTO memory_edge (src, dst, relation, weight, source_agent, created_at)
+		SELECT $1, $2, $3, $4, $5, $6
+		WHERE EXISTS (SELECT 1 FROM memory WHERE id = $1) AND EXISTS (SELECT 1 FROM memory WHERE id = $2)
+		ON CONFLICT DO NOTHING`, e.Src, e.Dst, e.Relation, e.Weight, e.SourceAgent, e.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("import edge: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		im.sum.Edges++
+	} else {
+		im.sum.Skipped++
+	}
+	return nil
+}
+
+func (im *Importer) addRef(ctx context.Context, f ArchivedRef) error {
+	var scope string
+	err := im.tx.QueryRow(ctx, `SELECT scope FROM memory WHERE id = $1`, f.MemoryID).Scan(&scope)
+	if errors.Is(err, pgx.ErrNoRows) {
+		im.sum.Skipped++
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if f.Scope != scope {
+		return fmt.Errorf("import code reference: scope %q does not match memory scope %q", f.Scope, scope)
+	}
+	tag, err := im.tx.Exec(ctx, `
+		INSERT INTO memory_ref (memory_id, scope, path, symbol, state, resolved_path, anchor_hash, anchor_commit, checked_commit, checked_at, created_at)
+		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11 WHERE EXISTS (SELECT 1 FROM memory WHERE id = $1)
+		ON CONFLICT DO NOTHING`,
+		f.MemoryID, f.Scope, f.Path, f.Symbol, f.State, f.ResolvedPath, f.AnchorHash, f.AnchorCommit, f.CheckedCommit, f.CheckedAt, f.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("import code reference: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		im.sum.Refs++
+	} else {
+		im.sum.Skipped++
 	}
 	return nil
 }
@@ -358,5 +372,17 @@ func (im *Importer) finish(ctx context.Context) error {
 			return errors.New("archive contains a supersedes cycle")
 		}
 	}
+	for _, e := range im.edges {
+		if err := im.addEdge(ctx, e); err != nil {
+			return err
+		}
+	}
+	im.edges = nil
+	for _, f := range im.refs {
+		if err := im.addRef(ctx, f); err != nil {
+			return err
+		}
+	}
+	im.refs = nil
 	return nil
 }

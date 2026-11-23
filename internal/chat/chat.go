@@ -126,6 +126,14 @@ type Usage struct {
 // ErrTruncated means the model stopped at MaxTokens, so its JSON is likely incomplete.
 var ErrTruncated = errors.New("model output was truncated at the token limit")
 
+// ErrNoResponse means no completion was received: the transport failed, the
+// body could not be read, or the API answered with a non-200 status. The
+// provider billed nothing, so a caller tracking spend may release its
+// reservation instead of treating the missing usage as unknown usage. A 200
+// response that cannot be decoded is deliberately not this error: it may have
+// been billed.
+var ErrNoResponse = errors.New("the API returned no completion")
+
 type wireRequest struct {
 	Model           string    `json:"model"`
 	Messages        []Message `json:"messages"`
@@ -205,7 +213,7 @@ func (c *Client) complete(ctx context.Context, body wireRequest) (string, Usage,
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return "", Usage{}, err
+		return "", Usage{}, fmt.Errorf("%w: %w", ErrNoResponse, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -215,12 +223,12 @@ func (c *Client) complete(ctx context.Context, body wireRequest) (string, Usage,
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", Usage{}, fmt.Errorf("chat request: %w", err)
+		return "", Usage{}, fmt.Errorf("%w: %w", ErrNoResponse, err)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return "", Usage{}, fmt.Errorf("chat response: %w", err)
+		return "", Usage{}, fmt.Errorf("%w: %w", ErrNoResponse, err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return "", Usage{}, &StatusError{Code: resp.StatusCode, Status: resp.Status, Body: snippet(raw)}
@@ -244,6 +252,20 @@ type StatusError struct {
 	Code   int
 	Status string
 	Body   string
+}
+
+// Unbilled reports whether err means the provider produced no completion, so
+// nothing was billed. It is true for transport failures, unreadable bodies,
+// and non-200 responses; false for a 200 response whose usage is missing.
+func Unbilled(err error) bool {
+	if err == nil {
+		return false
+	}
+	var se *StatusError
+	if errors.As(err, &se) {
+		return true
+	}
+	return errors.Is(err, ErrNoResponse)
 }
 
 func (e *StatusError) Error() string { return fmt.Sprintf("chat: %s: %s", e.Status, e.Body) }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -190,5 +191,25 @@ func TestErrorsAndRetryable(t *testing.T) {
 	}
 	if Retryable(nil) {
 		t.Error("nil retryable")
+	}
+}
+
+// TestUnbilled checks the distinction between a call that produced no
+// completion (nothing billed) and a 200 response whose usage is missing.
+func TestUnbilled(t *testing.T) {
+	if Unbilled(nil) {
+		t.Error("nil is not unbilled")
+	}
+	if !Unbilled(&StatusError{Code: 429, Status: "429 Too Many Requests"}) {
+		t.Error("a non-200 response is unbilled")
+	}
+	if !Unbilled(fmt.Errorf("%w: %w", ErrNoResponse, errors.New("connection refused"))) {
+		t.Error("a transport failure is unbilled")
+	}
+	if Unbilled(ErrTruncated) || Unbilled(&OutputError{Err: errors.New("bad json")}) {
+		t.Error("a parsed response with bad output may have been billed")
+	}
+	if Unbilled(errors.New("chat: decode response: bad json")) {
+		t.Error("a 200 response that cannot be decoded may have been billed")
 	}
 }

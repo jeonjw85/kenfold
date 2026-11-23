@@ -615,7 +615,14 @@ func completeText(ctx context.Context, c *chat.Client, system, user string, maxT
 			return "", err
 		}
 		text, usage, err := c.Text(ctx, system, user, maxTokens)
-		if costErr := budget.settle(reserved, usage); costErr != nil {
+		if err != nil && chat.Unbilled(err) {
+			// No completion was produced, so nothing was billed. Release the
+			// reservation instead of treating the missing usage as unknown:
+			// a rate limit or transport failure must not end the run.
+			if relErr := budget.release(reserved); relErr != nil {
+				return "", relErr
+			}
+		} else if costErr := budget.settle(reserved, usage); costErr != nil {
 			return "", costErr
 		}
 		if err == nil {

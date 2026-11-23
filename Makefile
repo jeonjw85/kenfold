@@ -129,7 +129,7 @@ bench: ## LoCoMo + LongMemEval_S subset (needs up-embed, KENFOLD_BENCH_CHAT_URL,
 	@docker compose exec -T postgres psql -U kenfold -d kenfold -tAc \
 	  "SELECT 1 FROM pg_database WHERE datname = '$(TEST_DB)'" | grep -q 1 || \
 	  docker compose exec -T postgres psql -U kenfold -d kenfold -c "CREATE DATABASE $(TEST_DB)"
-	KENFOLD_TEST_DATABASE_URL="$(TEST_DB_URL)" \
+	@KENFOLD_TEST_DATABASE_URL="$(TEST_DB_URL)" \
 	KENFOLD_EVAL_EMBED_URL=http://127.0.0.1:11435/v1 KENFOLD_EVAL_EMBED_MODEL=kenfold-embed \
 	KENFOLD_BENCH_CHAT_URL="$(KENFOLD_BENCH_CHAT_URL)" KENFOLD_BENCH_API_KEY="$(KENFOLD_BENCH_API_KEY)" \
 	KENFOLD_BENCH_READER="$(BENCH_READER)" KENFOLD_BENCH_JUDGE="$(BENCH_JUDGE)" \

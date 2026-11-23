@@ -74,6 +74,28 @@ func TestArchiveStoreIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("an edge between memories does not drop a supersedes link", func(t *testing.T) {
+		reset()
+		// A hand-written or merged archive may put an edge between two
+		// memories. The edge arrives while the replaced memory is still
+		// pending; it must not force the link to be dropped.
+		parent := parentID
+		child, old := mk(childID, &parent), mk(parentID, nil)
+		edge := ArchivedEdge{Src: childID, Dst: parentID, Relation: "replaces", Weight: 1, SourceAgent: "test", CreatedAt: at}
+		sum, err := importRecords(ArchiveRecord{Memory: &child}, ArchiveRecord{Edge: &edge}, ArchiveRecord{Memory: &old})
+		if err != nil || sum.Memories != 2 || sum.Edges != 1 {
+			t.Fatalf("import = %+v, %v", sum, err)
+		}
+		got, err := s.Get(ctx, childID)
+		if err != nil || got.Supersedes == nil || *got.Supersedes != parentID {
+			t.Errorf("supersedes link = %v, %v; want %s", got.Supersedes, err, parentID)
+		}
+		var edges int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM memory_edge WHERE src = $1 AND dst = $2`, childID, parentID).Scan(&edges); err != nil || edges != 1 {
+			t.Errorf("edge rows = %d, %v; want 1", edges, err)
+		}
+	})
+
 	t.Run("existing memory is untouched when target arrives later", func(t *testing.T) {
 		reset()
 		existing := mk(childID, nil)

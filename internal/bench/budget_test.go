@@ -175,11 +175,17 @@ func TestBudgetIncompleteUsageStopsFurtherBillableCalls(t *testing.T) {
 	}
 }
 
-func TestBudgetHTTPFailureDoesNotRetryWithoutUsage(t *testing.T) {
+func TestBudgetHTTPFailureIsReleasedAndRetried(t *testing.T) {
+	// A rate limit or server error produced no completion, so nothing was
+	// billed. The reservation must be released and the call retried instead
+	// of ending the whole run as "usage unavailable".
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		http.Error(w, "temporary failure", http.StatusServiceUnavailable)
+		if calls.Add(1) == 1 {
+			http.Error(w, "slow down", http.StatusTooManyRequests)
+			return
+		}
+		fmt.Fprint(w, `{"choices":[{"finish_reason":"stop","message":{"content":"ok"}}],"usage":{"prompt_tokens":1000,"completion_tokens":100}}`)
 	}))
 	defer srv.Close()
 	c, err := chat.New(chat.Config{BaseURL: srv.URL, Model: "test", Reasoning: "none"})
@@ -190,11 +196,42 @@ func TestBudgetHTTPFailureDoesNotRetryWithoutUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := completeText(context.Background(), c, "", "hello", 8, b); !errors.Is(err, ErrBudgetUsageUnavailable) {
-		t.Fatalf("want fail-closed accounting error, got %v", err)
+	if _, err := completeText(context.Background(), c, "", "hello", 8, b); err != nil {
+		t.Fatalf("retry after a rate limit failed: %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("network calls = %d, want 2", calls.Load())
+	}
+	if b.calls != 1 || b.reserved != 0 || math.Abs(b.SpentUSD()-0.0015) > 1e-12 || b.stopped != nil {
+		t.Fatalf("budget after retry: calls=%d reserved=%g spent=%g stop=%v", b.calls, b.reserved, b.SpentUSD(), b.stopped)
+	}
+}
+
+func TestBudgetRejectedRequestDoesNotStopTheRun(t *testing.T) {
+	// A non-retryable rejection is also unbilled: release the reservation and
+	// report the API error, without latching the budget shut.
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.Error(w, "bad request", http.StatusBadRequest)
+	}))
+	defer srv.Close()
+	c, err := chat.New(chat.Config{BaseURL: srv.URL, Model: "test", Reasoning: "none"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := NewBudget(1, 1.25, 2.5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := completeText(context.Background(), c, "", "hello", 8, b); err == nil || errors.Is(err, ErrBudgetUsageUnavailable) {
+		t.Fatalf("want the API error, got %v", err)
 	}
 	if calls.Load() != 1 {
-		t.Fatalf("failed request was retried %d times", calls.Load())
+		t.Fatalf("non-retryable request was retried %d times", calls.Load())
+	}
+	if b.calls != 0 || b.reserved != 0 || b.SpentUSD() != 0 || b.stopped != nil {
+		t.Fatalf("budget after rejection: calls=%d reserved=%g spent=%g stop=%v", b.calls, b.reserved, b.SpentUSD(), b.stopped)
 	}
 }
 

@@ -17,6 +17,13 @@ const (
 	// sight of a metadata document URL triggers an outbound fetch.
 	authorizeBurst     = 30
 	authorizePerSecond = 5
+	// Token and revocation requests are cheap but needed by every client, so
+	// the budget is generous; it bounds a flood that would otherwise occupy
+	// every database connection.
+	tokenBurst      = 100
+	tokenPerSecond  = 20
+	revokeBurst     = 20
+	revokePerSecond = 5
 )
 
 // rateLimiter is a token bucket with an injectable clock.
