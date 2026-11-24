@@ -3,7 +3,7 @@
   "name": "io.github.jeonjw85/kenfold",
   "title": "Kenfold",
   "description": "Self-hosted shared memory for AI agents, with provenance, code references, and handoffs.",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "repository": {
     "url": "https://github.com/jeonjw85/kenfold",
     "source": "github"
