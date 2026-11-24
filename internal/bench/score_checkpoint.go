@@ -35,13 +35,16 @@ const (
 // embedding/reranking, scoring code/options, weights and inference profiles.
 // Model names alone are insufficient. Only its SHA-256 is persisted.
 type ScoreCache struct {
-	mu       sync.Mutex
-	dir      string
-	identity string
-	dirInfo  os.FileInfo
-	lockInfo os.FileInfo
-	lock     *os.File
-	stopped  error
+	// retryDelay is the pause before retrying a call that produced no
+	// completion (tests shorten it).
+	retryDelay func(attempt int) time.Duration
+	mu         sync.Mutex
+	dir        string
+	identity   string
+	dirInfo    os.FileInfo
+	lockInfo   os.FileInfo
+	lock       *os.File
+	stopped    error
 }
 
 type scoreNamespace struct {
@@ -158,7 +161,8 @@ func NewScoreCache(dir, identity string) (*ScoreCache, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrScoreCheckpoint, err)
 	}
-	c := &ScoreCache{dir: dir, identity: sha256Hex([]byte(identity)), dirInfo: info}
+	c := &ScoreCache{dir: dir, identity: sha256Hex([]byte(identity)), dirInfo: info,
+		retryDelay: func(attempt int) time.Duration { return time.Duration(attempt+1) * 2 * time.Second }}
 	lock, err := os.OpenFile(filepath.Join(dir, ".score.lock"), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o600)
 	if err != nil {
 		return nil, c.fail(err)
@@ -429,26 +433,79 @@ func validateScoreState(s scoreState) error {
 // retains that phase and stops. Nil-cache scoring still uses completeText's
 // existing retry policy. No budget allowance is initialized/released here.
 func (c *ScoreCache) complete(ctx context.Context, state *scoreState, phase string, client *chat.Client, system, user string, maxTokens int, budget *Budget) (string, error) {
-	reserved, err := budget.reserve(system, user, maxTokens)
-	if err != nil {
-		return "", err
-	}
 	inFlight := *state
 	inFlight.Phase = phase
-	if err := c.save(inFlight); err != nil {
+	var last error
+	for attempt := 0; attempt < 3; attempt++ {
+		reserved, err := budget.reserve(system, user, maxTokens)
+		if err != nil {
+			return "", err
+		}
+		if attempt == 0 {
+			if err := c.save(inFlight); err != nil {
+				return "", err
+			}
+			*state = inFlight
+		}
+		text, usage, callErr := client.Text(ctx, system, user, maxTokens)
+		if callErr != nil && chat.Unbilled(callErr) {
+			// No completion and nothing billed: the outcome is known, so this
+			// is safe to retry. The checkpoint stays in-flight.
+			if err := budget.release(reserved); err != nil {
+				return "", c.fail(err)
+			}
+			last = callErr
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(c.retryDelay(attempt)):
+			}
+			continue
+		}
+		if err := budget.settle(reserved, usage); err != nil {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			return "", c.fail(err)
+		}
+		if callErr != nil {
+			return "", c.unknown(phase)
+		}
+		return strings.TrimSpace(text), nil
+	}
+	// Every attempt failed before producing a completion. Remove the marker
+	// so a later run retries this question instead of refusing to start.
+	if err := c.clear(*state); err != nil {
 		return "", err
 	}
-	*state = inFlight
-	text, usage, callErr := client.Text(ctx, system, user, maxTokens)
-	if err := budget.settle(reserved, usage); err != nil {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		return "", c.fail(err)
+	return "", fmt.Errorf("%w: %v", c.unknown(phase), last)
+}
+
+// clear removes an in-flight record so a later run retries the question. It
+// refuses to remove anything that already holds a result.
+func (c *ScoreCache) clear(state scoreState) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.check(); err != nil {
+		return err
 	}
-	if callErr != nil {
-		return "", c.unknown(phase)
+	if state.Phase != scoreReaderInFlight && state.Phase != scoreJudgeInFlight {
+		return c.fail(errors.New("only an in-flight score record may be cleared"))
 	}
-	return strings.TrimSpace(text), nil
+	old, hit, err := c.read(state.Key)
+	if err != nil {
+		return c.fail(err)
+	}
+	if !hit || old.Phase != state.Phase {
+		return c.fail(errors.New("in-flight score record changed before it could be cleared"))
+	}
+	path, err := c.path(state.Key)
+	if err != nil {
+		return c.fail(err)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return c.fail(fmt.Errorf("clear question record: %w", err))
+	}
+	return nil
 }
 
 func (c *ScoreCache) unknown(phase string) error {
