@@ -145,7 +145,6 @@ func TestBudgetIncompleteUsageStopsFurtherBillableCalls(t *testing.T) {
 	for _, tc := range []struct{ name, usage string }{
 		{"missing output", `{"prompt_tokens":1000}`},
 		{"null output", `{"prompt_tokens":1000,"completion_tokens":null}`},
-		{"zero output", `{"prompt_tokens":1000,"completion_tokens":0}`},
 		{"null input", `{"prompt_tokens":null,"completion_tokens":1}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -384,5 +383,34 @@ func TestBudgetUnderestimatedReservationFailsClosed(t *testing.T) {
 	}
 	if math.Abs(b.SpentUSD()-0.1250025) > 1e-12 {
 		t.Fatalf("actual usage was not recorded: %f", b.SpentUSD())
+	}
+}
+
+func TestBudgetBillsAnEmptyAnswer(t *testing.T) {
+	// An empty completion is a real answer (for example a filtered or refused
+	// response). Its usage object is present, so the prompt is billed and the
+	// run continues instead of latching "usage unavailable".
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		fmt.Fprint(w, `{"choices":[{"finish_reason":"stop","message":{"content":""}}],"usage":{"prompt_tokens":1000,"completion_tokens":0}}`)
+	}))
+	defer srv.Close()
+	c, err := chat.New(chat.Config{BaseURL: srv.URL, Model: "test", Reasoning: "none"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := NewBudget(1, 1.25, 2.5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := completeText(context.Background(), c, "", "hello", 8, b); err != nil {
+		t.Fatalf("empty answer stopped the run: %v", err)
+	}
+	if calls.Load() != 1 || b.calls != 1 || b.stopped != nil {
+		t.Fatalf("calls=%d budget.calls=%d stop=%v", calls.Load(), b.calls, b.stopped)
+	}
+	if math.Abs(b.SpentUSD()-0.00125) > 1e-12 || b.completion != 0 {
+		t.Fatalf("empty answer was not billed for its prompt: spent=%g completion=%d", b.SpentUSD(), b.completion)
 	}
 }

@@ -113,11 +113,16 @@ func (b *Budget) settle(reserved float64, usage chat.Usage) error {
 		b.reserved = 0
 	}
 	b.calls++
-	// These answer/judge completions require nonempty output. A zero count is
-	// also how the chat decoder represents missing/null fields: fail closed.
-	if usage.PromptTokens <= 0 || usage.CompletionTokens <= 0 {
+	// Fail closed only when the response did not report usage, or reported an
+	// impossible count. A zero completion is a real (empty) answer: the prompt
+	// was still billed.
+	if usage.Missing || usage.PromptTokens < 0 || usage.CompletionTokens < 0 {
 		b.spent += reserved
-		b.stopped = ErrBudgetUsageUnavailable
+		if usage.Missing {
+			b.stopped = fmt.Errorf("%w: the response reported no token usage", ErrBudgetUsageUnavailable)
+		} else {
+			b.stopped = fmt.Errorf("%w: the response reported invalid token usage", ErrBudgetUsageUnavailable)
+		}
 		if err := b.persistJournal(); err != nil {
 			return b.journalFailure(err)
 		}

@@ -121,6 +121,16 @@ type Request struct {
 type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
+	// Missing reports that the response carried no usage object, or one
+	// without both counts. A present count of zero is valid: an empty answer
+	// still bills its prompt.
+	Missing bool `json:"-"`
+}
+
+// wireUsage distinguishes an absent field from a reported zero.
+type wireUsage struct {
+	PromptTokens     *int `json:"prompt_tokens"`
+	CompletionTokens *int `json:"completion_tokens"`
 }
 
 // ErrTruncated means the model stopped at MaxTokens, so its JSON is likely incomplete.
@@ -151,7 +161,7 @@ type wireResponse struct {
 			Content string `json:"content"`
 		} `json:"message"`
 	} `json:"choices"`
-	Usage Usage `json:"usage"`
+	Usage *wireUsage `json:"usage"`
 }
 
 // JSON runs a completion and decodes the model's JSON answer into out. It
@@ -237,14 +247,18 @@ func (c *Client) complete(ctx context.Context, body wireRequest) (string, Usage,
 	if err := json.Unmarshal(raw, &wr); err != nil {
 		return "", Usage{}, fmt.Errorf("chat: decode response: %w", err)
 	}
+	usage := Usage{Missing: true}
+	if wr.Usage != nil && wr.Usage.PromptTokens != nil && wr.Usage.CompletionTokens != nil {
+		usage = Usage{PromptTokens: *wr.Usage.PromptTokens, CompletionTokens: *wr.Usage.CompletionTokens}
+	}
 	if len(wr.Choices) == 0 {
-		return "", wr.Usage, errors.New("chat: response has no choices")
+		return "", usage, errors.New("chat: response has no choices")
 	}
 	content := wr.Choices[0].Message.Content
 	if wr.Choices[0].FinishReason == "length" {
-		return content, wr.Usage, ErrTruncated
+		return content, usage, ErrTruncated
 	}
-	return content, wr.Usage, nil
+	return content, usage, nil
 }
 
 // StatusError is a non-200 response.

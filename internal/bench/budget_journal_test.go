@@ -450,7 +450,7 @@ func TestBudgetJournalConcurrentStopSettlementsRemainDurable(t *testing.T) {
 	if err := b.settle(first, chat.Usage{PromptTokens: 1000000, CompletionTokens: 1}); !errors.Is(err, ErrBudgetExceeded) {
 		t.Fatalf("underestimated reservation did not stop: %v", err)
 	}
-	if err := b.settle(second, chat.Usage{}); !errors.Is(err, ErrBudgetUsageUnavailable) {
+	if err := b.settle(second, chat.Usage{Missing: true}); !errors.Is(err, ErrBudgetUsageUnavailable) {
 		t.Fatalf("unknown usage did not stop: %v", err)
 	}
 	var rec budgetRecord
@@ -482,7 +482,7 @@ func TestBudgetJournalUnknownThenUnderestimatedSettlementRemainsDurable(t *testi
 	unknownSettled := make(chan struct{})
 	settlements := make(chan error, 2)
 	go func() {
-		settlements <- b.settle(first, chat.Usage{})
+		settlements <- b.settle(first, chat.Usage{Missing: true})
 		close(unknownSettled)
 	}()
 	go func() {
